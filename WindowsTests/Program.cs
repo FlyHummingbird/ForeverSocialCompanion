@@ -1,0 +1,447 @@
+using System.Reflection;
+using System.Text.Json;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Runtime.Loader;
+using System.Net;
+using System.Net.Http.Json;
+using ForeverSocial.Companion;
+
+internal static class WindowsRegressionTests
+{
+    [STAThread]
+    private static int Main(string[] args)
+    {
+        if(args is ["--background-http",var fixtureRoot,var testEndpoint,var backgroundReport])return LoopbackBackgroundProbe.Run(fixtureRoot,testEndpoint,backgroundReport);
+        if(args is ["--inspect-invitation",var invitationPath]){
+            var value=InvitationSource.Read(invitationPath);
+            Console.WriteLine(JsonSerializer.Serialize(new{valid=true,length=value.Length,clipboardUsed=false,networkUsed=false,codePrinted=false}));return 0;
+        }
+        if(args is ["--inspect-game",var gameRoot]){
+            using var window=new CompanionWindow(_=>null,Path.Combine(Path.GetTempPath(),"ForeverSocial-probe-"+Guid.NewGuid().ToString("N")+".json"));
+            var input=(TextBox)window.Controls.Find("gameFolder",true).Single();input.Text=gameRoot;
+            typeof(TextBox).GetMethod("OnKeyDown",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(input,[new KeyEventArgs(Keys.Enter)]);
+            var count=((ComboBox)window.Controls.Find("characters",true).Single()).Items.Count;
+            Console.WriteLine(JsonSerializer.Serialize(new{characters=count,publicExportReadable=count>0,networkUsed=false,credentialsRead=false,gameFilesWritten=false}));return count>0?0:1;
+        }
+        if (args is ["--entrypoint", var assemblyPath, var entryReport]) {
+            var probe=new AssemblyLoadContext("packaged-entrypoint",isCollectible:true);
+            var assembly = probe.LoadFromAssemblyPath(Path.GetFullPath(assemblyPath));
+            var ok = assembly.EntryPoint?.GetCustomAttribute<STAThreadAttribute>() is not null;
+            File.WriteAllText(entryReport, JsonSerializer.Serialize(new {
+                assembly = Path.GetFileName(assemblyPath), sha256=Digest(assemblyPath),
+                exactAssemblyLoaded=Path.GetFullPath(assembly.Location)==Path.GetFullPath(assemblyPath),
+                requiredUiApartment = "STA", mainHasStaThreadAttribute = ok,
+                passed = ok ? 1 : 0, total = 1
+            }));
+            Console.WriteLine((ok ? "PASS" : "FAIL") + " packaged entry point uses STA for Windows shell dialogs");
+            probe.Unload();
+            return ok ? 0 : 1;
+        }
+        if (args is not ["--report", var reportPath]) return 2;
+        Application.SetHighDpiMode(HighDpiMode.SystemAware);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        // Keep a Forms message host alive while many test windows are closed and
+        // recreated. Production uses Application.Run with one main form.
+        using var messageHost=new Form{ShowInTaskbar=false,Opacity=0,Size=new System.Drawing.Size(1,1)};
+        messageHost.Show();Application.DoEvents();
+        var checks=new List<object>();var failed=0;
+        var work=Path.Combine(Path.GetTempPath(),"ForeverSocial-ui-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(work);
+        var windows=new List<CompanionWindow>();
+        void Assert(bool value,[System.Runtime.CompilerServices.CallerLineNumber]int line=0){if(!value)throw new InvalidOperationException("UI assertion failed at line "+line);}
+        void Check(string name,Action action){
+            var filter=Environment.GetEnvironmentVariable("FS_UI_TEST_FILTER");if(filter is not null && !name.Contains(filter,StringComparison.Ordinal))return;
+            try{action();checks.Add(new{name,ok=true});Console.WriteLine("PASS "+name);}
+            catch(Exception ex){failed++;checks.Add(new{name,ok=false,error=ex.GetType().Name+": "+ex.Message});Console.WriteLine("FAIL "+name+": "+ex.Message);}
+            finally{foreach(var window in windows){window.Close();window.Dispose();}windows.Clear();}
+        }
+        CompanionWindow Window(Func<IWin32Window,string?> picker,CompanionServices? services=null,string? settings=null,bool setup=true){
+            var window=new CompanionWindow(picker,settings ?? Path.Combine(work,"settings-"+Guid.NewGuid().ToString("N")+".json"),services){
+                ShowInTaskbar=false,Opacity=0};
+            windows.Add(window);window.Show();Application.DoEvents();
+            // There is no Application.Run in this component harness. Install the
+            // real UI context explicitly before invoking async window handlers.
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+            if(setup)window.ShowSetup(true);
+            return window;
+        }
+        T Control<T>(CompanionWindow window,string name)where T:System.Windows.Forms.Control => (T)window.Controls.Find(name,true).Single();
+        void Browse(CompanionWindow window)=>Control<Button>(window,"browse").PerformClick();
+        void Enter(CompanionWindow window,string path){
+            var input=Control<TextBox>(window,"gameFolder");input.Text=path;
+            var key=new KeyEventArgs(Keys.Enter);
+            typeof(TextBox).GetMethod("OnKeyDown",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(input,[key]);
+            Assert(key.SuppressKeyPress && key.Handled);
+        }
+        string Export(string client,string actor="Alice-TestRealm")=>"ForeverSocialBridge = {[\"format\"]=1,[\"characters\"]={[\""+actor+"\"]={[\"client\"]=\""+client+"\",[\"community\"]=\"TestRealm\",[\"enabled\"]=true,[\"savedAt\"]=1,[\"records\"]={}}}}";
+        string Client(string flavor){
+            var root=Path.Combine(work,"WoW ä "+Guid.NewGuid().ToString("N"),"_"+flavor+"_");
+            Directory.CreateDirectory(Path.Combine(root,"Interface","AddOns"));
+            var slot=Path.Combine(root,"Interface","AddOns","ForeverSocial");Directory.CreateDirectory(Path.Combine(slot,"Data"));
+            File.WriteAllText(Path.Combine(slot,flavor=="forever"?"ForeverSocial_Camelot.toc":"ForeverSocial_Mainline.toc"),"## X-ForeverSocial-Companion: 1\nData/Companion.lua\n");
+            File.WriteAllText(Path.Combine(slot,"Data","Companion.lua"),"-- Empty optional cache\n");
+            var sv=Path.Combine(root,"WTF","Account","TEST","SavedVariables");Directory.CreateDirectory(sv);
+            File.WriteAllText(Path.Combine(sv,"ForeverSocial.lua"),Export(flavor));return root;
+        }
+        void PumpUntil(Func<bool> ready){var watch=System.Diagnostics.Stopwatch.StartNew();while(!ready() && watch.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(5);}Assert(ready());}
+        void Await(Task task,[System.Runtime.CompilerServices.CallerArgumentExpression(nameof(task))]string expression=""){
+            try{PumpUntil(()=>task.IsCompleted);}catch(Exception ex){throw new InvalidOperationException("Pending test task: "+expression,ex);}task.GetAwaiter().GetResult();}
+        string ExportFile(string root)=>Path.Combine(root,"WTF","Account","TEST","SavedVariables","ForeverSocial.lua");
+        string Payload(string root)=>Path.Combine(root,"Interface","AddOns","ForeverSocial","Data","Companion.lua");
+        void WritePost(string root,string text="My public post",long savedAt=1){
+            var record=FakeCommunity.Post("Alice-TestRealm",text);
+            File.WriteAllText(ExportFile(root),Export("forever").Replace("[\"savedAt\"]=1","[\"savedAt\"]="+savedAt,StringComparison.Ordinal)
+                .Replace("[\"records\"]={}","[\"records\"]={"+SavedVariables.Quote(Protocol.EncodeWire(record))+"}",StringComparison.Ordinal));
+        }
+        Check("application entry point declares STA",()=>Assert(typeof(CompanionWindow).Assembly.EntryPoint?.GetCustomAttribute<STAThreadAttribute>() is not null));
+        Check("actual Windows Forms thread and OLE initialize as STA",()=>Assert(Thread.CurrentThread.GetApartmentState()==ApartmentState.STA && Application.OleRequired()==ApartmentState.STA));
+        var exampleInvitation=new string('C',64);
+        string InvitationFile(string content){var path=Path.Combine(work,"invitation-"+Guid.NewGuid().ToString("N")+".txt");File.WriteAllText(path,content);return path;}
+        Check("invitation parser accepts German English and raw codes",()=>{
+            Assert(InvitationSource.Parse("Einladungscode: "+exampleInvitation+"\r\n")==exampleInvitation);
+            Assert(InvitationSource.Parse("Server: test\nInvitation code: "+exampleInvitation+"\nInstructions: private")==exampleInvitation);
+            Assert(InvitationSource.Parse(exampleInvitation+"\n")==exampleInvitation);
+        });
+        Check("invitation parser rejects duplicate oversized executable and network-file input",()=>{
+            foreach(var text in new[]{"short","PRIVATE CLIPBOARD TEXT",new string('a',257),"Einladungscode: "+exampleInvitation+"\nEinladungscode: "+exampleInvitation,new string('a',16385)}){
+                var rejected=false;try{InvitationSource.Parse(text);}catch(InvalidDataException){rejected=true;}Assert(rejected);
+            }
+            var denied=false;try{InvitationSource.Read(@"\\example.invalid\share\invitation.txt");}catch(InvalidDataException){denied=true;}Assert(denied);
+        });
+        foreach(var culture in new[]{"en-US","de-DE"}){
+            CultureInfo.CurrentUICulture=CultureInfo.GetCultureInfo(culture);
+            var manualHint=culture=="de-DE"?"direkt ein":"directly";
+            Check(culture+": accepted folder loads character with dialog owner and STA",()=>{
+                var root=Client("forever");IWin32Window? owner=null;ApartmentState? apartment=null;
+                using var window=Window(w=>{owner=w;apartment=Thread.CurrentThread.GetApartmentState();return root;});Browse(window);
+                Assert(owner==window && apartment==ApartmentState.STA);
+                Assert(Control<TextBox>(window,"gameFolder").Text==root && Control<ComboBox>(window,"characters").Items.Count==1);
+            });
+            Check(culture+": cancel preserves an existing valid selection",()=>{
+                var root=Client("forever");var count=0;using var window=Window(_=>++count==1?root:null);
+                Browse(window);var actor=Control<ComboBox>(window,"characters").SelectedItem;Browse(window);
+                Assert(Control<TextBox>(window,"gameFolder").Text==root && Equals(Control<ComboBox>(window,"characters").SelectedItem,actor));
+            });
+            Check(culture+": COM dialog failure is recoverable on the next click",()=>{
+                var root=Client("retail");var count=0;using var window=Window(_=>++count==1?throw new COMException("Synthetic picker failure"):root);
+                Browse(window);Assert(Control<Label>(window,"status").Text.Contains(manualHint,StringComparison.Ordinal));
+                Browse(window);Assert(Control<ComboBox>(window,"characters").Items.Count==1 && !window.IsDisposed);
+            });
+            Check(culture+": thread-state failure offers manual path entry",()=>{
+                using var window=Window(_=>throw new ThreadStateException("Synthetic wrong apartment"));Browse(window);
+                Assert(Control<Label>(window,"status").Text.Contains(manualHint,StringComparison.Ordinal) && !window.IsDisposed);
+            });
+            Check(culture+": denied shell dialog retains the selected path",()=>{
+                var root=Client("forever");var count=0;using var window=Window(_=>++count==1?root:throw new System.ComponentModel.Win32Exception(5));
+                Browse(window);Browse(window);Assert(Control<TextBox>(window,"gameFolder").Text==root && Control<ComboBox>(window,"characters").Items.Count==1);
+            });
+            Check(culture+": manually entered Retail path and Enter load characters",()=>{
+                var root=Client("retail");using var window=Window(_=>null);Enter(window,root);
+                Assert(Control<ComboBox>(window,"characters").Items.Count==1 && Control<ComboBox>(window,"characters").SelectedItem!.ToString()!.EndsWith("retail",StringComparison.Ordinal));
+            });
+            Check(culture+": invalid then valid folders cannot retain stale characters",()=>{
+                var root=Client("forever");using var window=Window(_=>root);Browse(window);Enter(window,work);
+                Assert(Control<ComboBox>(window,"characters").Items.Count==0);Enter(window,root);Assert(Control<ComboBox>(window,"characters").Items.Count==1);
+            });
+            Check(culture+": corrupt export is contained and recovery works",()=>{
+                var root=Client("forever");var file=Path.Combine(root,"WTF","Account","TEST","SavedVariables","ForeverSocial.lua");
+                using var window=Window(_=>root);Browse(window);File.WriteAllText(file,"ForeverSocialBridge = {broken");Enter(window,root);
+                Assert(Control<ComboBox>(window,"characters").Items.Count==0);File.WriteAllText(file,Export("forever"));Enter(window,root);
+                Assert(Control<ComboBox>(window,"characters").Items.Count==1);
+            });
+            Check(culture+": removed consent clears the old character selection",()=>{
+                var root=Client("forever");using var window=Window(_=>root);Browse(window);
+                var file=Path.Combine(root,"WTF","Account","TEST","SavedVariables","ForeverSocial.lua");File.WriteAllText(file,Export("forever").Replace("true","false",StringComparison.Ordinal));
+                Enter(window,root);Assert(Control<ComboBox>(window,"characters").Items.Count==0);
+            });
+            Check(culture+": repeated manual validation preserves the chosen character",()=>{
+                var root=Client("forever");var extra=Path.Combine(root,"WTF","Account","SECOND","SavedVariables");Directory.CreateDirectory(extra);
+                File.WriteAllText(Path.Combine(extra,"ForeverSocial.lua"),Export("forever","Beren-TestRealm"));
+                using var window=Window(_=>root);Browse(window);var characters=Control<ComboBox>(window,"characters");Assert(characters.Items.Count==2);
+                characters.SelectedIndex=1;var selected=characters.SelectedItem;Enter(window,root);Assert(Equals(characters.SelectedItem,selected));
+            });
+            Check(culture+": folder selection performs no network, credential or game-data writes",()=>{
+                var root=Client("forever");var configs=Directory.EnumerateFiles(work,"settings-*.json").Order().ToArray();using var window=Window(_=>root);Browse(window);
+                Assert(Directory.EnumerateFiles(Path.Combine(root,"Interface","AddOns"),"*",SearchOption.AllDirectories).Count()==2 && !File.ReadAllText(Payload(root)).Contains("ForeverSocialCompanionData",StringComparison.Ordinal));
+                Assert(Directory.EnumerateFiles(work,"settings-*.json").Order().SequenceEqual(configs));
+            });
+            Check(culture+": returning to the app discovers an export saved after startup",()=>{
+                var root=Client("forever");var file=Path.Combine(root,"WTF","Account","TEST","SavedVariables","ForeverSocial.lua");File.Delete(file);
+                using var window=Window(_=>root);Enter(window,root);Assert(Control<ComboBox>(window,"characters").Items.Count==0);
+                File.WriteAllText(file,Export("forever"));
+                typeof(Form).GetMethod("OnActivated",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(window,[EventArgs.Empty]);
+                Assert(Control<ComboBox>(window,"characters").Items.Count==1);
+            });
+            Check(culture+": connecting refreshes a stale empty list before checking the invitation",()=>{
+                var root=Client("forever");var file=Path.Combine(root,"WTF","Account","TEST","SavedVariables","ForeverSocial.lua");File.Delete(file);
+                using var window=Window(_=>root);Enter(window,root);var connect=Control<Button>(window,"connect");connect.Focus();
+                File.WriteAllText(file,Export("forever"));connect.PerformClick();
+                Assert(Control<ComboBox>(window,"characters").Items.Count==1);
+                Assert(Control<Label>(window,"status").Text.Contains(culture=="de-DE"?"Einladungscode":"invitation code",StringComparison.Ordinal));
+            });
+            Check(culture+": a missing export gives reload instructions before any connection attempt",()=>{
+                var root=Client("forever");File.Delete(Path.Combine(root,"WTF","Account","TEST","SavedVariables","ForeverSocial.lua"));
+                using var window=Window(_=>root);Enter(window,root);Control<Button>(window,"connect").PerformClick();
+                Assert(Control<Label>(window,"status").Text.Contains("/reload",StringComparison.Ordinal));
+                Assert(Control<ComboBox>(window,"characters").Items.Count==0);
+            });
+            Check(culture+": activation preserves successful status without a network request",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>root,server.Services());Enter(window,root);
+                Await(window.SynchronizeNowAsync());var status=Control<Label>(window,"status").Text;var requests=server.Downloads;
+                using(var bitmap=new System.Drawing.Bitmap(window.Width,window.Height)){window.DrawToBitmap(bitmap,new System.Drawing.Rectangle(System.Drawing.Point.Empty,window.Size));bitmap.Save(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(reportPath))!,"companion-"+typeof(CompanionWindow).Assembly.GetName().Version?.ToString(3)+"-"+culture+".png"));}
+                typeof(Form).GetMethod("OnActivated",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(window,[EventArgs.Empty]);
+                Assert(Control<Label>(window,"status").Text==status && server.Downloads==requests);
+            });
+            Check(culture+": real timer receives remote updates with unchanged export while minimized",()=>{
+                var root=Client("forever");WritePost(root);var original=Digest(ExportFile(root));var server=new FakeCommunity();
+                using var window=Window(_=>root,server.Services(60));Enter(window,root);Await(window.SynchronizeNowAsync());
+                Assert(server.Uploads==1 && server.Downloads==1);server.AddPost("Beren-TestRealm","Arrived while minimized");
+                Control<CheckBox>(window,"automatic").Checked=true;Control<Button>(window,"minimize").PerformClick();
+                PumpUntil(()=>server.Downloads>=2 && !window.IsSynchronizing);Control<CheckBox>(window,"automatic").Checked=false;
+                Assert(server.Uploads==1 && File.ReadAllText(Payload(root)).Contains("Arrived while minimized",StringComparison.Ordinal));
+                Assert(!window.Visible && window.TrayVisible && Digest(ExportFile(root))==original);
+            });
+            Check(culture+": unchanged content and a newer savedAt still poll without upload or disk rewrite",()=>{
+                var root=Client("forever");WritePost(root);var server=new FakeCommunity();using var window=Window(_=>root,server.Services());Enter(window,root);
+                Await(window.SynchronizeNowAsync());var hash=Digest(Payload(root));var stamp=File.GetLastWriteTimeUtc(Payload(root));
+                WritePost(root,savedAt:2);Await(window.SynchronizeNowAsync());
+                Assert(server.Downloads==2 && server.Uploads==1 && Digest(Payload(root))==hash && File.GetLastWriteTimeUtc(Payload(root))==stamp);
+            });
+            Check(culture+": changed public export is uploaded on the next automatic timer tick",()=>{
+                var root=Client("forever");WritePost(root);var server=new FakeCommunity();using var window=Window(_=>root,server.Services(60));Enter(window,root);
+                Await(window.SynchronizeNowAsync());WritePost(root,"Updated public post");Control<CheckBox>(window,"automatic").Checked=true;
+                PumpUntil(()=>server.Uploads>=2 && !window.IsSynchronizing);Control<CheckBox>(window,"automatic").Checked=false;
+                Assert(File.ReadAllText(Payload(root)).Contains("Updated public post",StringComparison.Ordinal));
+            });
+            Check(culture+": automatic opt-in and selected character survive restart without storing secrets",()=>{
+                var root=Client("forever");var extra=Path.Combine(root,"WTF","Account","SECOND","SavedVariables");Directory.CreateDirectory(extra);
+                File.WriteAllText(Path.Combine(extra,"ForeverSocial.lua"),Export("forever","Beren-TestRealm"));
+                var config=Path.Combine(work,"restart-"+Guid.NewGuid().ToString("N")+".json");var server=new FakeCommunity();
+                object? selected=null;
+                using(var first=Window(_=>root,server.Services(60),config)){
+                    Enter(first,root);Control<ComboBox>(first,"characters").SelectedIndex=1;
+                    selected=Control<ComboBox>(first,"characters").SelectedItem;
+                    Control<TextBox>(first,"invite").Text="NEVER_STORE_INVITATION";Control<CheckBox>(first,"automatic").Checked=true;
+                    first.Close();
+                }
+                var text=File.ReadAllText(config);Assert(!text.Contains("NEVER_STORE_INVITATION",StringComparison.Ordinal) && !text.Contains(FakeCommunity.Token,StringComparison.Ordinal));
+                using var second=Window(_=>null,server.Services(60),config);
+                Assert(Control<CheckBox>(second,"automatic").Checked && Equals(Control<ComboBox>(second,"characters").SelectedItem,selected));
+                PumpUntil(()=>server.Downloads>0 && !second.IsSynchronizing);Control<CheckBox>(second,"automatic").Checked=false;
+            });
+            Check(culture+": pausing automatic sync stops future ticks",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>root,server.Services(60));Enter(window,root);
+                var checkbox=Control<CheckBox>(window,"automatic");checkbox.Checked=true;
+                PumpUntil(()=>server.Downloads>0 && !window.IsSynchronizing);checkbox.Checked=false;var requests=server.Downloads;
+                var stop=System.Diagnostics.Stopwatch.StartNew();while(stop.ElapsedMilliseconds<180){Application.DoEvents();Thread.Sleep(5);}
+                Assert(server.Downloads==requests && !window.PollingEnabled);
+            });
+            Check(culture+": no invitation or credential causes no background HTTP request",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>root,server.Services(60,credential:false));Enter(window,root);
+                Control<CheckBox>(window,"automatic").Checked=true;
+                PumpUntil(()=>Control<Label>(window,"status").Text.Contains(culture=="de-DE"?"zuerst":"first",StringComparison.Ordinal));
+                Control<CheckBox>(window,"automatic").Checked=false;Assert(server.Uploads+server.Downloads==0);
+            });
+            Check(culture+": revoking export consent stops background HTTP",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>root,server.Services(60));Enter(window,root);Await(window.SynchronizeNowAsync());
+                var requests=server.Downloads;File.WriteAllText(ExportFile(root),Export("forever").Replace("true","false",StringComparison.Ordinal));
+                Control<CheckBox>(window,"automatic").Checked=true;PumpUntil(()=>Control<ComboBox>(window,"characters").Items.Count==0);
+                Control<CheckBox>(window,"automatic").Checked=false;Assert(server.Downloads==requests);
+            });
+            Check(culture+": server failures use backoff and recover without discarding pending upload",()=>{
+                var root=Client("forever");WritePost(root);var clock=DateTimeOffset.UtcNow;var server=new FakeCommunity { Failure=HttpStatusCode.ServiceUnavailable };
+                using var window=Window(_=>root,server.Services(now:()=>clock));Enter(window,root);Control<CheckBox>(window,"automatic").Checked=true;
+                clock=window.NextPoll;Await(window.PollAsync());var first=window.NextPoll;
+                Await(window.PollAsync());Assert(server.Uploads==1);
+                clock=first;Await(window.PollAsync());Assert(window.NextPoll-clock>=TimeSpan.FromSeconds(60));
+                server.Failure=null;clock=window.NextPoll;Await(window.PollAsync());Control<CheckBox>(window,"automatic").Checked=false;
+                Assert(server.Uploads==3 && server.Downloads==1 && File.ReadAllText(Payload(root)).Contains("My public post",StringComparison.Ordinal));
+            });
+            Check(culture+": concurrent tick and button cannot start overlapping requests",()=>{
+                var root=Client("forever");var server=new FakeCommunity { WaitForRelease=true };using var window=Window(_=>root,server.Services(60));Enter(window,root);
+                var first=window.SynchronizeNowAsync();Assert(window.IsSynchronizing);Await(window.SynchronizeNowAsync());Await(window.PollAsync());Assert(server.Downloads==1);
+                server.Release.TrySetResult();Await(first);Assert(!window.IsSynchronizing && Control<Button>(window,"synchronize").Enabled);
+            });
+            Check(culture+": closing cancels an outstanding request and stops the timer",()=>{
+                var root=Client("forever");var server=new FakeCommunity { WaitForRelease=true };using var window=Window(_=>root,server.Services());Enter(window,root);
+                var task=window.SynchronizeNowAsync();Assert(window.IsSynchronizing);window.Close();Await(task);Assert(window.IsDisposed && server.Canceled);
+            });
+            Check(culture+": changing endpoint invalidates upload deduplication",()=>{
+                var root=Client("forever");WritePost(root);var server=new FakeCommunity();using var window=Window(_=>root,server.Services());Enter(window,root);Await(window.SynchronizeNowAsync());
+                Control<TextBox>(window,"endpoint").Text="https://another.example";Await(window.SynchronizeNowAsync());Assert(server.Uploads==2 && server.Downloads==2);
+                Assert(File.ReadAllText(Payload(root)).Contains("https://another.example",StringComparison.Ordinal));
+            });
+            Check(culture+": recent history is bounded and no server error body or bearer appears in UI",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>root,server.Services());Enter(window,root);
+                for(var i=0;i<35;i++)Await(window.SynchronizeNowAsync());Assert(Control<ListBox>(window,"activity").Items.Count==30);
+                server.Failure=HttpStatusCode.Unauthorized;Await(window.SynchronizeNowAsync());
+                var text=Control<Label>(window,"status").Text+string.Join(' ',Control<ListBox>(window,"activity").Items.Cast<string>());
+                Assert(!text.Contains("SERVER_SECRET",StringComparison.Ordinal) && !text.Contains(FakeCommunity.Token,StringComparison.Ordinal));
+                Assert(text.Contains(culture=="de-DE"?"ungültig":"invalid",StringComparison.Ordinal));
+            });
+            Check(culture+": clipboard is read only by an explicit paste click",()=>{
+                var root=Client("forever");var server=new FakeCommunity();var reads=0;var writes=0;
+                using var window=Window(_=>root,server.Services(readClipboard:()=>{reads++;return exampleInvitation;},writeClipboard:_=>writes++));Enter(window,root);
+                typeof(Form).GetMethod("OnActivated",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(window,[EventArgs.Empty]);
+                Assert(reads==0 && writes==0);Control<Button>(window,"pasteInvitation").PerformClick();
+                Assert(reads==1 && writes==0 && Control<TextBox>(window,"invite").Text==exampleInvitation && server.Enrolls==0);
+            });
+            Check(culture+": explicit copy sends only the code and never logs it",()=>{
+                var root=Client("forever");var server=new FakeCommunity();string? copied=null;
+                using var window=Window(_=>root,server.Services(writeClipboard:text=>copied=text));Enter(window,root);Control<TextBox>(window,"invite").Text=exampleInvitation;
+                Control<Button>(window,"copyInvitation").PerformClick();Assert(copied==exampleInvitation);
+                Assert(!Control<Label>(window,"status").Text.Contains(exampleInvitation,StringComparison.Ordinal) && Control<ListBox>(window,"activity").Items.Count==0);
+            });
+            Check(culture+": loading a private invitation remembers its path and server but never its code",()=>{
+                var root=Client("forever");var file=InvitationFile("Einladungscode: "+exampleInvitation);var hash=Digest(file);var config=Path.Combine(work,"invite-settings-"+Guid.NewGuid().ToString("N")+".json");
+                var server=new FakeCommunity();IWin32Window? owner=null;using var window=Window(_=>root,server.Services(invitationFile:w=>{owner=w;return file;}),config);Enter(window,root);
+                Control<Button>(window,"useInvitation").PerformClick();Assert(owner==window && Control<TextBox>(window,"invite").Text==exampleInvitation);
+                var saved=CompanionSettings.Load(config);Assert(saved.InvitationFile==file && saved.InvitationEndpoint=="https://social.wgfreunde.com/");
+                Assert(!File.ReadAllText(config).Contains(exampleInvitation,StringComparison.Ordinal) && Digest(file)==hash && server.Enrolls==0);
+            });
+            Check(culture+": connecting automatically uses the remembered invitation without clipboard access",()=>{
+                var root=Client("forever");var file=InvitationFile("Einladungscode: "+exampleInvitation);var config=Path.Combine(work,"connect-invite-"+Guid.NewGuid().ToString("N")+".json");
+                new CompanionSettings{Folder=root,InvitationFile=file,InvitationEndpoint="https://social.wgfreunde.com"}.Save(config);
+                var server=new FakeCommunity();using var window=Window(_=>null,server.Services(credential:false),config);
+                Assert(Control<TextBox>(window,"invite").Text.Length==0);Control<Button>(window,"connect").PerformClick();PumpUntil(()=>!window.IsSynchronizing);
+                Assert(server.Enrolls==1 && server.LastInvitation==exampleInvitation && server.Downloads==1 && Control<TextBox>(window,"invite").Text.Length==0);
+                Assert(!File.ReadAllText(config).Contains(exampleInvitation,StringComparison.Ordinal));
+            });
+            Check(culture+": copy can use a remembered invitation without searching files",()=>{
+                var root=Client("forever");var file=InvitationFile(exampleInvitation);var config=Path.Combine(work,"copy-invite-"+Guid.NewGuid().ToString("N")+".json");
+                new CompanionSettings{Folder=root,InvitationFile=file,InvitationEndpoint="https://social.wgfreunde.com/"}.Save(config);
+                var server=new FakeCommunity();string? copied=null;using var window=Window(_=>null,server.Services(writeClipboard:text=>copied=text),config);
+                Control<Button>(window,"copyInvitation").PerformClick();Assert(copied==exampleInvitation && server.Enrolls+server.Downloads==0);
+            });
+            Check(culture+": changing servers clears the code and cannot auto-use a different server's invitation",()=>{
+                var root=Client("forever");var file=InvitationFile(exampleInvitation);var server=new FakeCommunity();var writes=0;
+                using var window=Window(_=>root,server.Services(credential:false,invitationFile:_=>file,writeClipboard:_=>writes++));Enter(window,root);Control<Button>(window,"useInvitation").PerformClick();
+                Control<TextBox>(window,"endpoint").Text="https://different.example";Assert(Control<TextBox>(window,"invite").Text.Length==0);
+                Control<Button>(window,"copyInvitation").PerformClick();Control<Button>(window,"connect").PerformClick();PumpUntil(()=>!window.IsSynchronizing);
+                Assert(writes==0 && server.Enrolls+server.Uploads+server.Downloads==0);
+            });
+            Check(culture+": invalid clipboard text is contained without overwriting the current code",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>root,server.Services(readClipboard:()=>"PRIVATE CLIPBOARD TEXT"));Enter(window,root);
+                Control<TextBox>(window,"invite").Text=exampleInvitation;Control<Button>(window,"pasteInvitation").PerformClick();
+                Assert(Control<TextBox>(window,"invite").Text==exampleInvitation && !Control<Label>(window,"status").Text.Contains("PRIVATE CLIPBOARD TEXT",StringComparison.Ordinal));
+            });
+            Check(culture+": clipboard locking is recoverable and does not publish the code",()=>{
+                var root=Client("forever");var server=new FakeCommunity();var calls=0;string? copied=null;
+                using var window=Window(_=>root,server.Services(writeClipboard:text=>{if(++calls==1)throw new ExternalException("Clipboard busy");copied=text;}));Enter(window,root);
+                Control<TextBox>(window,"invite").Text=exampleInvitation;Control<Button>(window,"copyInvitation").PerformClick();Assert(!window.IsDisposed && copied is null);
+                Control<Button>(window,"copyInvitation").PerformClick();Assert(copied==exampleInvitation && server.Enrolls==0);
+            });
+            Check(culture+": canceling invitation selection preserves the previous reference",()=>{
+                var root=Client("forever");var file=InvitationFile(exampleInvitation);var server=new FakeCommunity();var picks=0;
+                using var window=Window(_=>root,server.Services(invitationFile:_=>++picks==1?file:null));Enter(window,root);
+                Control<Button>(window,"useInvitation").PerformClick();Control<Button>(window,"useInvitation").PerformClick();
+                Assert(picks==2 && Control<TextBox>(window,"invite").Text==exampleInvitation && server.Enrolls==0);
+            });
+            Check(culture+": a missing private file is not read at startup and prevents enrollment on click",()=>{
+                var root=Client("forever");var file=Path.Combine(work,"missing-private.txt");var config=Path.Combine(work,"missing-invite-"+Guid.NewGuid().ToString("N")+".json");
+                new CompanionSettings{Folder=root,InvitationFile=file,InvitationEndpoint="https://social.wgfreunde.com"}.Save(config);
+                var server=new FakeCommunity();using var window=Window(_=>null,server.Services(credential:false),config);Assert(Control<TextBox>(window,"invite").Text.Length==0);
+                Control<Button>(window,"connect").PerformClick();PumpUntil(()=>!window.IsSynchronizing);
+                Assert(server.Enrolls+server.Downloads==0 && Control<Button>(window,"connect").Enabled);
+            });
+            Check(culture+": an already connected character uses its credential without reading or resending an invitation",()=>{
+                var root=Client("forever");var config=Path.Combine(work,"existing-access-"+Guid.NewGuid().ToString("N")+".json");
+                new CompanionSettings{Folder=root,InvitationFile=Path.Combine(work,"absent-private.txt"),InvitationEndpoint="https://social.wgfreunde.com"}.Save(config);
+                var server=new FakeCommunity();using var window=Window(_=>null,server.Services(),config);Control<Button>(window,"connect").PerformClick();PumpUntil(()=>!window.IsSynchronizing);
+                Assert(server.Enrolls==0 && server.Downloads==1 && Control<TextBox>(window,"invite").Text.Length==0);
+            });
+            string CompactSettings(string root,string? source=null){var config=Path.Combine(work,"compact-"+Guid.NewGuid().ToString("N")+".json");new CompanionSettings{Folder=root,InvitationFile=source ?? "",InvitationEndpoint=source is null?"":"https://social.wgfreunde.com"}.Save(config);return config;}
+            Check(culture+": configured app opens compact with no editable setup fields",()=>{
+                var root=Client("forever");using var window=Window(_=>null,new FakeCommunity().Services(),CompactSettings(root),setup:false);
+                Assert(!Control<TableLayoutPanel>(window,"setupPanel").Visible && !Control<TextBox>(window,"gameFolder").Visible && !Control<TextBox>(window,"endpoint").Visible && !Control<TextBox>(window,"invite").Visible);
+                Assert(!Control<ComboBox>(window,"characters").Visible && Control<Label>(window,"characterSummary").Text.Contains("Alice-TestRealm",StringComparison.Ordinal));
+                Assert(!Control<TableLayoutPanel>(window,"historyPanel").Visible);
+            });
+            Check(culture+": first setup remains accessible when no game folder is configured",()=>{
+                using var window=Window(_=>null,new FakeCommunity().Services(),setup:false);Assert(Control<TableLayoutPanel>(window,"setupPanel").Visible && Control<Button>(window,"browse").Visible);
+            });
+            Check(culture+": setup link opens and closes fields without network access",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>null,server.Services(),CompactSettings(root),setup:false);
+                var link=Control<LinkLabel>(window,"setupToggle");
+                void Click()=>typeof(LinkLabel).GetMethod("OnLinkClicked",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(link,[new LinkLabelLinkClickedEventArgs(link.Links[0])]);
+                Click();Assert(Control<TextBox>(window,"gameFolder").Visible);Click();Assert(!Control<TextBox>(window,"gameFolder").Visible && server.Downloads+server.Enrolls==0);
+            });
+            Check(culture+": compact primary button connects using the private invitation and writes only the main addon",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>null,server.Services(credential:false),CompactSettings(root,InvitationFile(exampleInvitation)),setup:false);
+                Control<Button>(window,"synchronize").PerformClick();PumpUntil(()=>!window.IsSynchronizing);
+                Assert(server.Enrolls==1 && File.ReadAllText(Payload(root)).Contains("ForeverSocialCompanionData",StringComparison.Ordinal));
+                Assert(!Directory.Exists(Path.Combine(root,"Interface/AddOns/ForeverSocial_Companion")) && !Control<TableLayoutPanel>(window,"setupPanel").Visible);
+            });
+            Check(culture+": compact primary button reveals invitation setup only when needed",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>null,server.Services(credential:false),CompactSettings(root),setup:false);
+                Control<Button>(window,"synchronize").PerformClick();PumpUntil(()=>!window.IsSynchronizing);
+                Assert(Control<TextBox>(window,"invite").Visible && server.Enrolls+server.Downloads==0);
+            });
+            Check(culture+": multiple characters keep a selector and update the visible character name",()=>{
+                var root=Client("forever");var other=Path.Combine(root,"WTF/Account/SECOND/SavedVariables");Directory.CreateDirectory(other);File.WriteAllText(Path.Combine(other,"ForeverSocial.lua"),Export("forever","Beren-TestRealm"));
+                using var window=Window(_=>null,new FakeCommunity().Services(),CompactSettings(root),setup:false);var selector=Control<ComboBox>(window,"characters");
+                Assert(selector.Visible && selector.Items.Count==2);selector.SelectedIndex=1;Assert(Control<Label>(window,"characterSummary").Text.StartsWith(selector.SelectedItem!.ToString()!.Split(" · ")[0],StringComparison.Ordinal));
+            });
+            Check(culture+": recent activity can be expanded independently of connection settings",()=>{
+                var root=Client("forever");using var window=Window(_=>null,new FakeCommunity().Services(),CompactSettings(root),setup:false);
+                var link=Control<LinkLabel>(window,"historyToggle");typeof(LinkLabel).GetMethod("OnLinkClicked",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(link,[new LinkLabelLinkClickedEventArgs(link.Links[0])]);
+                Assert(Control<ListBox>(window,"activity").Visible && !Control<TableLayoutPanel>(window,"setupPanel").Visible);
+            });
+        }
+        // Fixtures are deliberately isolated; no real game or account paths are used.
+        var result=new{generatedAtUTC=DateTimeOffset.UtcNow,passed=checks.Count-failed,total=checks.Count,
+            checks,componentUiTests=true,nativeFolderDialogInteracted=false,
+            appAssemblySHA256=Digest(typeof(CompanionWindow).Assembly.Location),
+            appSourceSHA256=Directory.EnumerateFiles(AppSource()).Where(p=>Path.GetExtension(p) is ".cs" or ".csproj" or ".manifest").ToDictionary(p=>Path.GetFileName(p),Digest)};
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
+        File.WriteAllText(reportPath,JsonSerializer.Serialize(result,new JsonSerializerOptions{WriteIndented=true}));
+        Console.WriteLine($"{checks.Count-failed}/{checks.Count} Windows regressions passed");
+        return failed==0?0:1;
+    }
+    private static string Digest(string path)=>Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+    private static string AppSource()=>Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,"../../../../App"));
+}
+
+internal sealed class FakeCommunity
+{
+    private static readonly long Epoch=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    internal const string Token="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    internal int Uploads,Downloads,Enrolls;
+    internal string? LastInvitation;
+    internal HttpStatusCode? Failure;
+    internal bool WaitForRelease,Canceled;
+    internal TaskCompletionSource Release { get; }=new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Dictionary<string,WireRecord> rows=[];
+    internal static WireRecord Post(string actor,string text)=>new("posts",JsonSerializer.SerializeToElement(new{id=actor+"@test",author=actor,created=Epoch-60,updated=Epoch,version=1,category="general",text,deleted=false},Protocol.Json));
+    internal void AddPost(string actor,string text){var row=Post(actor,text);rows[Protocol.Key(row)]=row;}
+    internal CompanionServices Services(int interval=30000,bool credential=true,Func<DateTimeOffset>? now=null,Func<string>? readClipboard=null,Action<string>? writeClipboard=null,Func<IWin32Window,string?>? invitationFile=null)=>new(){
+        CreateClient=uri=>new SyncClient(uri,new Handler(this)),LoadCredential=(_,_)=>credential?Token:null,SaveCredential=(_,_,_)=>{},
+        PollIntervalMilliseconds=interval,Now=now ?? (()=>DateTimeOffset.UtcNow),
+        ReadClipboardText=readClipboard ?? (()=>throw new InvalidOperationException("No clipboard read expected")),
+        WriteClipboardText=writeClipboard ?? (_=>throw new InvalidOperationException("No clipboard write expected")),
+        ChooseInvitationFile=invitationFile ?? (_=>throw new InvalidOperationException("No file picker expected"))};
+    private sealed class Handler(FakeCommunity server):HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)
+        {
+            var path=request.RequestUri!.AbsolutePath;
+            if(path=="/v1/records")server.Uploads++;else if(path=="/v1/snapshot")server.Downloads++;
+            if(server.Failure is { } failure)return new HttpResponseMessage(failure){Content=new StringContent("SERVER_SECRET")};
+            if(server.WaitForRelease){try{await server.Release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);}catch(OperationCanceledException){server.Canceled=true;throw;}}
+            if(path=="/v1/records"){
+                var upload=(await request.Content!.ReadFromJsonAsync<Upload>(Protocol.Json,cancellationToken).ConfigureAwait(false))!;
+                foreach(var row in upload.Records)server.rows[Protocol.Key(row)]=row;
+                return new(HttpStatusCode.OK){Content=Body(new{accepted=upload.Records.Count})};
+            }
+            if(path=="/v1/enroll"){
+                server.Enrolls++;server.LastInvitation=(await request.Content!.ReadFromJsonAsync<Enrollment>(Protocol.Json,cancellationToken).ConfigureAwait(false))!.Invite;
+                return new(HttpStatusCode.OK){Content=Body(new Credential(Token,"synthetic-account"))};
+            }
+            return new(HttpStatusCode.OK){Content=Body(new Snapshot(1,DateTimeOffset.UtcNow.ToUnixTimeSeconds(),server.rows.Values.ToList(),0))};
+        }
+        private static StringContent Body<T>(T value)=>new(JsonSerializer.Serialize(value,Protocol.Json),System.Text.Encoding.UTF8,"application/json");
+    }
+}
