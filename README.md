@@ -2,7 +2,7 @@
 
 **An optional Windows companion for the Forever Social WoW addon.**
 
-[**Download for Windows**](https://github.com/FlyHummingbird/ForeverSocialCompanion/releases/latest) · [Setup / Einrichtung](Docs/USER-README.md) · [Privacy](PRIVACY.md)
+[**Download for Windows**](https://github.com/FlyHummingbird/ForeverSocialCompanion/releases) · [Setup / Einrichtung](Docs/USER-README.md) · [Privacy](PRIVACY.md)
 
 ## English
 
