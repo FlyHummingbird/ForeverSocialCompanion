@@ -1,0 +1,13 @@
+**/bin
+**/obj
+.git
+.dotnet
+dist
+TestArtifacts
+data
+.env
+*.pem
+*.pfx
+*.p12
+*.key
+*.log
