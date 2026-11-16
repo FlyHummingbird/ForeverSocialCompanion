@@ -14,7 +14,7 @@ if(args is ["inspect-exports",var gameRoot]){
     foreach(var file in files){
         try{var parsed=SavedVariables.Exports(SavedVariables.Parse(File.ReadAllText(file)));
             counts.Add(new{parsed=true,exports=parsed.Count,enabled=parsed.Count(x=>x.Enabled),records=parsed.Sum(x=>x.Records.Count)});
-        }catch(Exception ex)when(ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException){counts.Add(new{parsed=false,error=ex.GetType().Name});}
+        }catch(Exception ex)when(ex is IOException or InvalidDataException or UnauthorizedAccessException or AccountAlreadyClaimedException or ArgumentException){counts.Add(new{parsed=false,error=ex.GetType().Name});}
     }
     Console.WriteLine(JsonSerializer.Serialize(new{files=files.Count,results=counts},Protocol.Json));return;
 }
@@ -28,7 +28,7 @@ if(args is ["bridge-test",var root,var exported,var endpoint]){
 var checks=new List<object>();var failures=0;var now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 void Check(string name,Action run){try{run();checks.Add(new{name,ok=true});Console.WriteLine("PASS "+name);}catch(Exception e){failures++;checks.Add(new{name,ok=false,error=e.Message});Console.WriteLine("FAIL "+name+" "+e.Message);}}
 void Assert(bool value){if(!value)throw new Exception("Assertion failed");}
-void Reject(Action run){try{run();}catch(Exception e)when(e is InvalidDataException or UnauthorizedAccessException){return;}throw new Exception("Invalid data was accepted");}
+void Reject(Action run){try{run();}catch(Exception e)when(e is InvalidDataException or UnauthorizedAccessException or AccountAlreadyClaimedException){return;}throw new Exception("Invalid data was accepted");}
 WireRecord Post(string actor="Beren-TestRealm",int version=1,bool deleted=false,string text="Grüße, Azeroth!")=>new("posts",JsonSerializer.SerializeToElement(new{id=actor+"@test",author=actor,created=now-60,updated=now,version,category="general",text,deleted},Protocol.Json));
 var temp=Path.Combine(Directory.GetCurrentDirectory(),"TestArtifacts",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
 void InstallSlot(string root){var folder=Path.Combine(root,"Interface","AddOns","ForeverSocial");Directory.CreateDirectory(Path.Combine(folder,"Data"));var toc=Path.GetFileName(root)=="_forever_"?"ForeverSocial_Camelot.toc":"ForeverSocial_Mainline.toc";File.WriteAllText(Path.Combine(folder,toc),"## X-ForeverSocial-Companion: 1\nData/Companion.lua\n");File.WriteAllText(Path.Combine(folder,"Data","Companion.lua"),"-- Empty optional data cache\n");}
@@ -68,6 +68,21 @@ Check("stored credentials are hashes, never bearer secrets",()=>{using var store
 string ClientFolder(string name){var root=Path.Combine(temp,name,"_forever_");Directory.CreateDirectory(Path.Combine(root,"Interface","AddOns"));InstallSlot(root);return root;}
 Export OwnExport(long saved=1)=>new("forever","Beren-TestRealm",true,[Post()],saved,"TestRealm");
 var service=new Uri("https://social.wgfreunde.com");
+Check("enrollment sends permitted character metadata without an invitation",()=>{
+    var handler=new SyncHandler();using var client=new SyncClient(service,handler);
+    var credential=client.Enroll(OwnExport()).GetAwaiter().GetResult();
+    var request=JsonSerializer.Deserialize<Enrollment>(handler.EnrollmentBody!,Protocol.Json)!;
+    Assert(credential.Token=="synthetic" && request is {Format:1,Enabled:true,Actor:"Beren-TestRealm",Client:"forever",Community:"TestRealm"});
+    Assert(!handler.EnrollmentBody!.Contains("invite",StringComparison.OrdinalIgnoreCase));
+});
+Check("disabled exports cannot enroll or send HTTP",()=>{
+    var handler=new SyncHandler();using var client=new SyncClient(service,handler);
+    Reject(()=>client.Enroll(OwnExport() with{Enabled=false}).GetAwaiter().GetResult());Assert(handler.Gets+handler.Posts==0);
+});
+Check("a second enrollment cannot rotate the first claim's credential",()=>{
+    using var store=new CommunityStore(Path.Combine(temp,"duplicate-claim"));var credential=store.Enroll("forever","Beren-TestRealm");
+    Reject(()=>store.Enroll("forever","Beren-TestRealm"));Assert(store.Authenticate(credential.Token)?.Actor=="Beren-TestRealm");
+});
 Check("background download mode always fetches without uploading unchanged records",()=>{
     var handler=new SyncHandler{Records=[Post()]};using var client=new SyncClient(service,handler);
     var snapshot=client.Sync(OwnExport(),"synthetic",uploadRecords:false).GetAwaiter().GetResult();
@@ -154,13 +169,18 @@ sealed class SyncHandler:HttpMessageHandler
 {
     internal int Gets,Posts;
     internal bool FailOnce;
+    internal string? EnrollmentBody;
     internal List<WireRecord> Records=[];
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)
     {
         if(request.Method==HttpMethod.Post)Posts++;else Gets++;
-        if(FailOnce){FailOnce=false;return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));}
-        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=request.Method==HttpMethod.Post
+        if(FailOnce){FailOnce=false;return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);}
+        if(request.RequestUri!.AbsolutePath=="/v1/enroll"){
+            EnrollmentBody=await request.Content!.ReadAsStringAsync(cancellationToken);
+            return new(HttpStatusCode.OK){Content=JsonContent.Create(new Credential("synthetic","account"),options:Protocol.Json)};
+        }
+        return new HttpResponseMessage(HttpStatusCode.OK){Content=request.Method==HttpMethod.Post
             ?JsonContent.Create(new{accepted=0},options:Protocol.Json)
-            :JsonContent.Create(new Snapshot(1,DateTimeOffset.UtcNow.ToUnixTimeSeconds(),Records,0),options:Protocol.Json)});
+            :JsonContent.Create(new Snapshot(1,DateTimeOffset.UtcNow.ToUnixTimeSeconds(),Records,0),options:Protocol.Json)};
     }
 }

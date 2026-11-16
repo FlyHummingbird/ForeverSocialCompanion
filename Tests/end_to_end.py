@@ -7,10 +7,10 @@ ROOT=Path(__file__).resolve().parents[1];ADDON=ROOT.parent/'ForeverSocial'
 PY=Path(sys.executable);DOTNET=Path('C:/Program Files/dotnet/dotnet.exe')
 WORK=ROOT/'TestArtifacts'/('e2e-'+secrets.token_hex(5));WORK.mkdir(parents=True)
 endpoint=os.environ.get('FS_TEST_URL','http://127.0.0.1:18891')
-invite=os.environ.get('FS_TEST_INVITE',secrets.token_hex(24));checks=[]
+checks=[]
 def request(path,data=None,token=None,method=None):
     body=None if data is None else json.dumps(data,ensure_ascii=False).encode()
-    req=urllib.request.Request(endpoint+path,data=body,method=method,headers={'Content-Type':'application/json','User-Agent':'ForeverSocialCompanion/1.0.0',**({'Authorization':'Bearer '+token} if token else {})})
+    req=urllib.request.Request(endpoint+path,data=body,method=method,headers={'Content-Type':'application/json','User-Agent':'ForeverSocialCompanion/1.3.0',**({'Authorization':'Bearer '+token} if token else {})})
     with urllib.request.urlopen(req,timeout=20) as response:return json.loads(response.read() or b'null')
 def table(value):
     if isinstance(value,str):return '"'+value.replace('\\','\\\\').replace('"','\\"').replace('\n','\\n')+'"'
@@ -46,7 +46,7 @@ def sync(lua,ns,root,token):
 server=None
 try:
     if 'FS_TEST_URL' not in os.environ:
-        env={**os.environ,'FS_INVITE':invite,'FS_DATA':str(WORK/'database'),'ASPNETCORE_URLS':endpoint,'ASPNETCORE_ENVIRONMENT':'Production'}
+        env={**os.environ,'FS_DATA':str(WORK/'database'),'ASPNETCORE_URLS':endpoint,'ASPNETCORE_ENVIRONMENT':'Production'}
         log=open(WORK/'server.log','w',encoding='utf-8')
         server=subprocess.Popen([str(DOTNET),str(ROOT/'Server/bin/Debug/net10.0/Server.dll')],env=env,stdout=log,stderr=subprocess.STDOUT)
         for _ in range(80):
@@ -64,7 +64,7 @@ try:
                 toc='ForeverSocial_Camelot.toc' if client=='forever' else 'ForeverSocial_Mainline.toc'
                 (slot.parent/toc).write_bytes((ADDON/toc).read_bytes())
                 (slot/'Companion.lua').write_bytes((ADDON/'Data/Companion.lua').read_bytes())
-            ca=request('/v1/enroll',{'invite':invite,'client':client,'actor':na.App.actor});cb=request('/v1/enroll',{'invite':invite,'client':client,'actor':nb.App.actor})
+            ca=request('/v1/enroll',{'format':1,'enabled':True,'client':client,'actor':na.App.actor});cb=request('/v1/enroll',{'format':1,'enabled':True,'client':client,'actor':nb.App.actor})
             try:
                 na.Social.SaveProfile(na.Social,a.table_from({'public':True,'bio':'\U0001F600'*500,'activities':'\U0001F600'*120}))
                 post=na.Social.CreatePost(na.Social,'Grüße, ein gemeinsamer Serverbeitrag! \U0001F600 \u2028','general');assert not isinstance(post,tuple),post

@@ -17,14 +17,13 @@ with socket.socket() as sock:
     sock.bind(('127.0.0.1', 0))
     port = sock.getsockname()[1]
 endpoint = f'http://127.0.0.1:{port}'
-invite = secrets.token_hex(32)
-env = {**os.environ, 'FS_INVITE': invite, 'FS_DATA': str(WORK / 'database'),
+env = {**os.environ, 'FS_DATA': str(WORK / 'database'),
        'ASPNETCORE_URLS': endpoint, 'ASPNETCORE_ENVIRONMENT': 'Production'}
 
 def request(path, data=None):
     req = urllib.request.Request(endpoint + path,
         data=None if data is None else json.dumps(data).encode(),
-        headers={'Content-Type': 'application/json', 'User-Agent': 'ForeverSocialCompanion/1.0.0'})
+        headers={'Content-Type': 'application/json', 'User-Agent': 'ForeverSocialCompanion/1.3.0'})
     with urllib.request.urlopen(req, timeout=10) as result:
         return json.load(result)
 
@@ -40,7 +39,7 @@ with (WORK / 'server.log').open('w', encoding='utf-8') as log:
                 time.sleep(.1)
         else:
             raise RuntimeError('Local API did not start')
-        tokens = [request('/v1/enroll', {'invite': invite, 'client': 'forever', 'actor': actor,
+        tokens = [request('/v1/enroll', {'format': 1, 'enabled': True, 'client': 'forever', 'actor': actor,
                                        'community': 'TestRealm'})['token']
                   for actor in ('Alice-TestRealm', 'Beren-TestRealm')]
         root = WORK / 'client' / '_forever_'
