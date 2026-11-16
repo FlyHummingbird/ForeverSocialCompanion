@@ -4,6 +4,7 @@ using System.Text.Json;
 using ForeverSocial.Companion;
 
 namespace ForeverSocial.Server;
+public sealed class AccountAlreadyClaimedException : Exception { }
 public sealed record Account(string Id,string Client,string Actor,string Community="");
 public sealed record StoredRecord(string Client,string Owner,WireRecord Wire,string Community="");
 public sealed record State(int Format,Dictionary<string,Account> Accounts,Dictionary<string,StoredRecord> Records);
@@ -35,7 +36,7 @@ public sealed class CommunityStore : IDisposable
         if(community=="")community=actor[(actor.LastIndexOf('-')+1)..];
         if(!Protocol.Text(community,100) || string.IsNullOrWhiteSpace(community) || community.Any(char.IsWhiteSpace) || !actor.EndsWith("-"+community,StringComparison.Ordinal))throw new InvalidDataException("Invalid community");
         lock(gate){
-            if(state.Accounts.Values.Any(a=>a.Client==client && a.Actor==actor))throw new InvalidDataException("Character already claimed; this is an unverified account claim, not Blizzard verification");
+            if(state.Accounts.Values.Any(a=>a.Client==client && a.Actor==actor))throw new AccountAlreadyClaimedException();
             if(state.Accounts.Count>=1000)throw new InvalidDataException("Account limit");
             var token=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));var account=new Account(Guid.NewGuid().ToString("N"),client,actor,community);
             var accounts=new Dictionary<string,Account>(state.Accounts){[Hash(token)]=account};Save(state with{Accounts=accounts});return new Credential(token,account.Id);
