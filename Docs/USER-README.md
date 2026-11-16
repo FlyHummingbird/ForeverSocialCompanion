@@ -9,9 +9,8 @@ addon without this app.
    no separate .NET installation required.
 2. In WoW, install Forever Social 1.3.2 or newer, open **/fs companion**, enable
    the optional connection and use **/reload** to save your export.
-3. On first setup, choose your **_forever_** or **_retail_** folder and provide
-   the community server's invitation. An invitation is supplied by the community
-   administrator; enabling the addon does not generate one.
+3. On first setup, choose your **_forever_** or **_retail_** folder.
+   No invitation code or registration form is needed.
 4. Select **Sync now**. Setup fields stay hidden after setup; **Change setup**
    opens them again. Existing credentials are reused.
 5. Use **/reload** in WoW to load downloaded data. New or changed game content
@@ -36,9 +35,8 @@ publisher. Do not disable Windows security or add exclusions. Download only from
    eine zusätzliche .NET-Installation ist nicht nötig.
 2. In WoW Forever Social 1.3.2 oder neuer installieren, **/fs companion** öffnen,
    die optionale Verbindung aktivieren und mit **/reload** speichern.
-3. Bei der ersten Einrichtung den Ordner **_forever_** oder **_retail_** auswählen
-   und die Einladung des Community-Servers angeben. Die Einladung bekommst du
-   vom Community-Betreiber; das Aktivieren des Addons erzeugt keinen Code.
+3. Bei der ersten Einrichtung den Ordner **_forever_** oder **_retail_** auswählen.
+   Ein Einladungscode oder Registrierungsformular ist nicht nötig.
 4. **Jetzt abgleichen** wählen. Die Felder bleiben danach eingeklappt und lassen
    sich über **Einrichtung ändern** öffnen. Vorhandene Zugänge werden übernommen.
 5. Heruntergeladene Daten im Spiel mit **/reload** laden. Neue oder geänderte
