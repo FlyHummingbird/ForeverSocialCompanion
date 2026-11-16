@@ -17,6 +17,9 @@ jobs:
       - name: Windows UI and automatic synchronization regressions
         shell: pwsh
         run: dotnet run --project WindowsTests/WindowsTests.csproj -- --report TestArtifacts/windows-ui-results.json
+      - name: Open enrollment and authenticated API regressions
+        shell: pwsh
+        run: python Tests/enrollment_e2e.py
       - name: Real local API and background timer integration
         shell: pwsh
         run: python Tests/background_e2e.py
