@@ -8,11 +8,12 @@ public sealed class SyncClient : IDisposable
     public SyncClient(Uri endpoint,HttpMessageHandler? handler=null)
     {
         http=handler==null?new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}):new HttpClient(handler);
-        http.BaseAddress=BridgeFiles.Endpoint(endpoint.AbsoluteUri);http.Timeout=TimeSpan.FromSeconds(30);http.DefaultRequestHeaders.UserAgent.ParseAdd("ForeverSocialCompanion/1.2.1");
+        http.BaseAddress=BridgeFiles.Endpoint(endpoint.AbsoluteUri);http.Timeout=TimeSpan.FromSeconds(30);http.DefaultRequestHeaders.UserAgent.ParseAdd("ForeverSocialCompanion/1.3.0");
     }
-    public async Task<Credential> Enroll(Export export,string invite,CancellationToken cancel=default)
+    public async Task<Credential> Enroll(Export export,CancellationToken cancel=default)
     {
-        using var response=await http.PostAsJsonAsync("v1/enroll",new Enrollment(invite,export.Client,export.Actor,export.Community),Protocol.Json,cancel).ConfigureAwait(false);response.EnsureSuccessStatusCode();
+        if(!export.Enabled)throw new InvalidDataException("Enable the companion inside the addon first");
+        using var response=await http.PostAsJsonAsync("v1/enroll",new Enrollment(export.Client,export.Actor,export.Community,1,true),Protocol.Json,cancel).ConfigureAwait(false);response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<Credential>(Protocol.Json,cancel).ConfigureAwait(false) ?? throw new InvalidDataException("Invalid enrollment");
     }
     public async Task<Snapshot> Sync(Export export,string token,CancellationToken cancel=default,bool uploadRecords=true)

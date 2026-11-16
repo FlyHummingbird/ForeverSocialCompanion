@@ -8,7 +8,7 @@ namespace ForeverSocial.Companion;
 public sealed record WireRecord(string Kind, JsonElement Record);
 public sealed record Upload(List<WireRecord> Records);
 public sealed record Snapshot(int Format, long FetchedAt, List<WireRecord> Records, int Accepted);
-public sealed record Enrollment(string Invite, string Client, string Actor, string Community="");
+public sealed record Enrollment(string Client, string Actor, string Community="", int Format=0, bool Enabled=false);
 public sealed record Credential(string Token, string Account);
 public sealed record Export(string Client, string Actor, bool Enabled, List<WireRecord> Records, long SavedAt=0, string Community="");
 
