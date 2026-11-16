@@ -19,9 +19,8 @@ the addon. Forever Social itself remains usable without the app.
 Download the Windows ZIP under **Releases**, extract it and open
 **ForeverSocialCompanion.exe**. You need Windows 10/11 x64 and Forever Social
 1.3.2 or newer. Enable the connection with **/fs companion**, save with
-**/reload**, then finish the first setup using your community's invitation.
-Existing access is reused. Invitations come from the community administrator;
-enabling the addon does not generate one.
+**/reload**, select the game folder in the app and click **Sync now**.
+No invitation code is needed. Existing access is reused.
 
 **WoW still needs /reload** to save new exports and load downloaded data.
 Background polling is not live HTTP inside the game. Server accounts do not
@@ -45,9 +44,9 @@ nutzen.
 Unter **Releases** das Windows-ZIP laden, entpacken und
 **ForeverSocialCompanion.exe** öffnen. Benötigt werden Windows 10/11 x64 und
 Forever Social ab 1.3.2. Im Spiel **/fs companion** öffnen, die Verbindung
-freigeben und mit **/reload** speichern. Beim ersten Start mit der Einladung
-deines Community-Betreibers einrichten. Bestehende Zugänge werden übernommen.
-Das Aktivieren des Addons erzeugt keinen Einladungscode.
+freigeben und mit **/reload** speichern. In der App den Spielordner auswählen
+und **Jetzt abgleichen** anklicken. Ein Einladungscode ist nicht nötig.
+Bestehende Zugänge werden übernommen.
 
 **/reload bleibt erforderlich**, damit WoW neue Exporte speichert und
 heruntergeladene Daten lädt. Die Automatik macht daraus keine Live-Verbindung
