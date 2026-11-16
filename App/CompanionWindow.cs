@@ -9,16 +9,11 @@ internal sealed class CompanionWindow : Form
     private static readonly Color Gold = Color.FromArgb(226, 184, 83), Muted = Color.FromArgb(170, 181, 193);
     private readonly TextBox folder = new() { Name = "gameFolder", Dock = DockStyle.Fill };
     private readonly TextBox endpoint = new() { Name = "endpoint", Dock = DockStyle.Fill };
-    private readonly TextBox invite = new() { Name = "invite", Dock = DockStyle.Fill, UseSystemPasswordChar = true };
     private readonly ComboBox characters = new() { Name = "characters", Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
     private readonly Label status = Message("status"), lastSync = Message("lastSync"), exportTime = Message("exportTime"), importHint = Message("importHint"), automaticState = Message("automaticState");
     private readonly Button browse = Button("browse", T("WoW-Spielordner auswählen…", "Choose WoW game folder…"));
     private readonly Button synchronize = Button("synchronize", T("Jetzt synchronisieren", "Synchronize now"));
     private readonly Button register = Button("connect", T("Charakter verbinden", "Connect character"));
-    private readonly Button useInvitation = Button("useInvitation", T("Einladung laden…", "Load invitation…"));
-    private readonly Button pasteInvitation = Button("pasteInvitation", T("Einfügen", "Paste"));
-    private readonly Button copyInvitation = Button("copyInvitation", T("Kopieren", "Copy"));
-    private readonly Label invitationHint = Message("invitationHint");
     private readonly Label characterSummary = Message("characterSummary");
     private readonly LinkLabel setupToggle = new() { Name="setupToggle",AutoSize=true,LinkColor=Gold,ActiveLinkColor=Color.White,Margin=new Padding(0,8,18,4) };
     private readonly LinkLabel historyToggle = new() { Name="historyToggle",Text=T("Letzte Aktivitäten","Recent activity"),AutoSize=true,LinkColor=Gold,ActiveLinkColor=Color.White,Margin=new Padding(0,8,0,4) };
@@ -91,15 +86,14 @@ internal sealed class CompanionWindow : Form
         }
         Row(T("Spielordner", "Game folder"), folder, 0); fields.Controls.Add(browse, 1, 1);
         Row(T("Community-Server", "Community server"), endpoint, 2);
-        Row(T("Einladungscode", "Invitation code"), invite, 4);
-        var invitationActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 1, 0, 5) };
-        invitationActions.Controls.Add(useInvitation); invitationActions.Controls.Add(pasteInvitation); invitationActions.Controls.Add(copyInvitation);
-        fields.Controls.Add(invitationActions, 1, 5); fields.Controls.Add(register, 1, 6);
-        connection.Controls.Add(invitationHint);
+        fields.Controls.Add(register, 1, 3);
+        connection.Controls.Add(new Label { AutoSize=true, MaximumSize=new Size(740,0), ForeColor=Muted,
+            Text=T("Im Addon /fs companion öffnen, Freigabe aktivieren und /reload ausführen. Danach hier „Jetzt abgleichen“ wählen. Ein Einladungscode ist nicht erforderlich.",
+                "Open /fs companion in the addon, enable sharing and use /reload. Then choose Sync now here. No invitation code is required.") });
         var recent = historyPanel = Card(T("LETZTE AKTIVITÄTEN", "RECENT ACTIVITY"));historyPanel.Name="historyPanel"; recent.Controls.Add(activity); layout.Controls.Add(recent);historyPanel.Visible=false;
         layout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(740, 0), Margin = new Padding(0, 9, 0, 0), ForeColor = Muted,
             Text = T("Nur freigegebene öffentliche Inhalte werden übertragen. Private Notizen, Begegnungen und Blocklisten bleiben privat. Minimieren lässt die App im Infobereich weiterlaufen; X beendet sie.", "Only permitted public content is transferred. Private notes, encounters and block lists stay private. Minimize to keep the app running in the system tray; X exits it.") });
-        foreach (var box in new TextBox[] { folder, endpoint, invite }) { box.BackColor = Color.FromArgb(32, 37, 46); box.ForeColor = ForeColor; box.BorderStyle = BorderStyle.FixedSingle; }
+        foreach (var box in new TextBox[] { folder, endpoint }) { box.BackColor = Color.FromArgb(32, 37, 46); box.ForeColor = ForeColor; box.BorderStyle = BorderStyle.FixedSingle; }
         characters.BackColor = activity.BackColor = Color.FromArgb(32, 37, 46); characters.ForeColor = activity.ForeColor = ForeColor;
         trayMenu.Items.Add(T("Öffnen", "Open"), null, (_, _) => RestoreWindow());
         trayMenu.Items.Add(T("Jetzt synchronisieren", "Synchronize now"), null, async (_, _) => await Act(false));
@@ -114,10 +108,6 @@ internal sealed class CompanionWindow : Form
         setupToggle.LinkClicked+=(_,_)=>ShowSetup(!setupPanel.Visible);
         historyToggle.LinkClicked+=(_,_)=>{historyPanel.Visible=!historyPanel.Visible;historyToggle.Text=historyPanel.Visible?T("Aktivitäten schließen","Hide activity"):T("Letzte Aktivitäten","Recent activity");};
         browse.Click += (_, _) => BrowseFolder();
-        useInvitation.Click += (_, _) => UseInvitation();
-        pasteInvitation.Click += (_, _) => PasteInvitation();
-        copyInvitation.Click += (_, _) => CopyInvitation();
-        endpoint.TextChanged += (_, _) => { invite.Clear(); RefreshInvitationHint(); };
         folder.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.Handled = e.SuppressKeyPress = true; ReadCharacters(); } };
         folder.Leave += (_, _) => { if (!busy) ReadCharacters(); };
         folder.TextChanged += (_, _) => { exports = []; characters.Items.Clear(); };
@@ -128,7 +118,6 @@ internal sealed class CompanionWindow : Form
         Activated += (_, _) => { if (!busy && !closing) ReadCharacters(); };
         folder.Text = preferences.Folder; endpoint.Text = preferences.Endpoint;
         ReadCharacters(); automatic.Checked = preferences.Automatic; initializing = false;
-        RefreshInvitationHint();
         AutomaticChanged(false);
         ShowSetup(Selected() is null);
     }
@@ -170,55 +159,6 @@ internal sealed class CompanionWindow : Form
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
         { automaticState.Text = T("Einstellungen konnten nicht gespeichert werden. Die aktuelle Sitzung läuft weiter.", "Settings could not be saved. The current session continues."); }
     }
-
-    private void RefreshInvitationHint()
-    {
-        var saved = InvitationSource.MatchesServer(preferences, endpoint.Text);
-        useInvitation.Text = saved ? T("Einladung ändern…", "Change invitation…") : T("Einladung laden…", "Load invitation…");
-        invitationHint.Text = saved
-            ? T("Einladung ist auf diesem PC hinterlegt. Bei „Charakter verbinden“ wird sie automatisch übernommen – auch für weitere Charaktere.", "An invitation is saved on this PC. Connect character uses it automatically, including for additional characters.")
-            : T("Einladung vom Serverbetreiber einmal einfügen oder als Datei laden. Eine geladene Datei wird für weitere Charaktere auf diesem PC vorgemerkt.", "Paste the administrator's invitation once or load its file. A loaded file is remembered for additional characters on this PC.");
-    }
-
-    private bool FillSavedInvitation()
-    {
-        if (!InvitationSource.MatchesServer(preferences, endpoint.Text)) return false;
-        invite.Text = InvitationSource.Read(preferences.InvitationFile);
-        return true;
-    }
-
-    private void InvitationAction(Action action)
-    {
-        if (busy || closing) return;
-        try { action(); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or InvalidOperationException or System.Runtime.InteropServices.ExternalException or ThreadStateException)
-        { SetStatus(T("Einladung konnte nicht übernommen werden. Datei oder Zwischenablage prüfen; der Code wurde nicht veröffentlicht.", "Could not use the invitation. Check the file or clipboard; the code was not published."), true); }
-    }
-
-    private void UseInvitation() => InvitationAction(() =>
-    {
-        var uri = BridgeFiles.Endpoint(endpoint.Text);
-        var path = services.ChooseInvitationFile(this);
-        if (path is null) return;
-        var code = InvitationSource.Read(path);
-        preferences = preferences with { InvitationFile = Path.GetFullPath(path), InvitationEndpoint = uri.AbsoluteUri };
-        invite.Text = code; SavePreferences(); RefreshInvitationHint();
-        SetStatus(T("Einladung übernommen. Wähle den Charakter und klicke auf „Charakter verbinden“.", "Invitation ready. Select the character and click Connect character."));
-    });
-
-    private void PasteInvitation() => InvitationAction(() =>
-    {
-        invite.Text = InvitationSource.Parse(services.ReadClipboardText());
-        SetStatus(T("Einladung eingefügt. Jetzt „Charakter verbinden“ wählen.", "Invitation pasted. Click Connect character."));
-    });
-
-    private void CopyInvitation() => InvitationAction(() =>
-    {
-        if (string.IsNullOrWhiteSpace(invite.Text) && !FillSavedInvitation())
-        { SetStatus(T("Zuerst eine Einladung einfügen oder laden.", "Paste or load an invitation first.")); return; }
-        services.WriteClipboardText(InvitationSource.Parse(invite.Text));
-        SetStatus(T("Einladungscode in die Zwischenablage kopiert.", "Invitation code copied to the clipboard."));
-    });
 
     private string? ChooseFolder(IWin32Window owner)
     {
@@ -278,31 +218,25 @@ internal sealed class CompanionWindow : Form
     {
         if (busy || closing) return;
         busy = true;
-        foreach (var control in new Control[] { synchronize, register, browse, folder, endpoint, characters, invite, useInvitation, pasteInvitation, copyInvitation }) control.Enabled = false;
+        foreach (var control in new Control[] { synchronize, register, browse, folder, endpoint, characters }) control.Enabled = false;
         try
         {
             if (!ReadCharacters() || Selected() is not { } export) {ShowSetup(true);return;}
             var root = BridgeFiles.ClientRoot(folder.Text); var uri = BridgeFiles.Endpoint(endpoint.Text);
             var token = services.LoadCredential(uri, export);
-            if (enroll && token is null && string.IsNullOrWhiteSpace(invite.Text))
-            {
-                try { FillSavedInvitation(); }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
-                {ShowSetup(true); SetStatus(T("Hinterlegte Einladung nicht verfügbar. Mit „Einladung ändern“ eine gültige Datei wählen oder den Code einfügen.", "Saved invitation unavailable. Choose a valid file with Change invitation or paste the code."), true); return; }
-            }
-            if (enroll && token is null && string.IsNullOrWhiteSpace(invite.Text)) {ShowSetup(true); SetStatus(T("Charakter gefunden. Einladungscode einfügen oder Einladung laden, dann „Charakter verbinden“ wählen.", "Character found. Paste the invitation code or load an invitation, then click Connect character.")); return; }
+            // Validate the installed data slot before creating a server account.
+            BridgeFiles.SnapshotPath(root);
             using var client = services.CreateClient(uri);
             if (enroll && token is null)
             {
                 SetStatus(T("Charakter wird verbunden…", "Connecting character…"));
-                var credential = await client.Enroll(export, invite.Text, lifetime.Token);
-                token = credential.Token; services.SaveCredential(uri, export, token); invite.Clear();
+                var credential = await client.Enroll(export, lifetime.Token);
+                token = credential.Token; services.SaveCredential(uri, export, token);
             }
-            if (token is null) { SetStatus(T("Diesen Charakter zuerst mit dem Einladungscode verbinden.", "Connect this character using an invitation code first.")); return; }
+            if (token is null) { SetStatus(T("Diesen Charakter zuerst mit „Jetzt abgleichen“ verbinden.", "Connect this character with Sync now first.")); return; }
             SetStatus(T("Community-Daten werden abgeglichen…", "Synchronizing community data…"));
             var outcome = await session.Synchronize(root, export, uri, token, client, lifetime.Token);
             if (closing) return;
-            if (enroll) invite.Clear();
             failures = 0;
             var time = services.Now().ToLocalTime().ToString("g");
             lastSync.Text = T("Letzter erfolgreicher Abgleich: ", "Last successful sync: ") + time;
@@ -326,7 +260,7 @@ internal sealed class CompanionWindow : Form
                 AddonUpdateRequiredException => T("Bitte Forever Social im Spiel auf Version 1.3.2 oder neuer aktualisieren.","Please update the in-game Forever Social addon to version 1.3.2 or newer."),
                 HttpRequestException { StatusCode: HttpStatusCode.BadRequest } => T("Der Server hat die Daten abgelehnt. Addon-Export und Serverversion prüfen.", "The server rejected the data. Check the addon export and server version."),
                 HttpRequestException { StatusCode: HttpStatusCode.Unauthorized } => T("Zugang abgelaufen oder ungültig. Charakter erneut verbinden oder Serverbetreiber kontaktieren.", "Access expired or invalid. Reconnect the character or contact the server administrator."),
-                HttpRequestException { StatusCode: HttpStatusCode.Forbidden } => T("Zugriff verweigert. Einladungscode oder Serverfreigabe prüfen.", "Access denied. Check the invitation code or server permissions."),
+                HttpRequestException { StatusCode: HttpStatusCode.Forbidden } => T("Zugriff verweigert. Vorhandenen Zugang und Serverfreigabe prüfen.", "Access denied. Check the existing credential and server permissions."),
                 HttpRequestException { StatusCode: HttpStatusCode.Conflict } => T("Dieser Charakter ist bereits verbunden. Vorhandenen Zugang nutzen oder Serverbetreiber kontaktieren.", "This character is already connected. Use the existing credential or contact the server administrator."),
                 HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests } => T("Der Server begrenzt Anfragen. Der nächste Versuch erfolgt mit Abstand.", "The server is limiting requests. The next attempt will be delayed."),
                 HttpRequestException or OperationCanceledException => T("Server nicht erreichbar. Verbindung wird beim nächsten Abgleich erneut geprüft.", "Server unreachable. The connection will be checked again on the next sync."),
@@ -341,7 +275,7 @@ internal sealed class CompanionWindow : Form
             nextPoll = services.Now().AddMilliseconds(Math.Min(300000, (double)timer.Interval * (1 << Math.Max(0, failures - 1))));
             if (!closing)
             {
-                foreach (var control in new Control[] { synchronize, register, browse, folder, endpoint, characters, invite, useInvitation, pasteInvitation, copyInvitation }) control.Enabled = true;
+                foreach (var control in new Control[] { synchronize, register, browse, folder, endpoint, characters }) control.Enabled = true;
                 if (automatic.Checked && failures > 0) automaticState.Text = T("Automatischer neuer Versuch ab ", "Automatic retry from ") + nextPoll.ToLocalTime().ToString("HH:mm:ss");
                 else if (automatic.Checked) automaticState.Text = T("Automatik aktiv · nächster Abgleich ab ", "Automatic sync active · next check from ") + nextPoll.ToLocalTime().ToString("HH:mm:ss");
             }

@@ -8,8 +8,6 @@ internal sealed record CompanionSettings
     public string Actor { get; init; } = "";
     public string Client { get; init; } = "";
     public bool Automatic { get; init; }
-    public string InvitationFile { get; init; } = "";
-    public string InvitationEndpoint { get; init; } = "";
 
     public static CompanionSettings Load(string path)
     {
