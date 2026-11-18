@@ -8,7 +8,7 @@ public sealed class SyncClient : IDisposable
     public SyncClient(Uri endpoint,HttpMessageHandler? handler=null)
     {
         http=handler==null?new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}):new HttpClient(handler);
-        http.BaseAddress=BridgeFiles.Endpoint(endpoint.AbsoluteUri);http.Timeout=TimeSpan.FromSeconds(30);http.DefaultRequestHeaders.UserAgent.ParseAdd("ForeverSocialCompanion/1.3.0");
+        http.BaseAddress=BridgeFiles.Endpoint(endpoint.AbsoluteUri);http.Timeout=TimeSpan.FromSeconds(30);http.DefaultRequestHeaders.UserAgent.ParseAdd("ForeverSocialCompanion/1.4.0");
     }
     public async Task<Credential> Enroll(Export export,CancellationToken cancel=default)
     {
@@ -29,7 +29,28 @@ public sealed class SyncClient : IDisposable
         await using var stream=await snapshot.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false);using var buffer=new MemoryStream();var chunk=new byte[8192];int length;
         while((length=await stream.ReadAsync(chunk,cancel).ConfigureAwait(false))>0){if(buffer.Length+length>Protocol.MaxFileBytes)throw new InvalidDataException("Response too large");buffer.Write(chunk,0,length);}
         var result=System.Text.Json.JsonSerializer.Deserialize<Snapshot>(buffer.ToArray(),Protocol.Json) ?? throw new InvalidDataException("Invalid snapshot");
-        if(result.Format!=1 || result.Records is null || result.Records.Count>1500)throw new InvalidDataException("Unsupported snapshot");return result with{Accepted=accepted};
+        if(result.Format!=1 || result.Records is null || result.Records.Count>1500 || result.Published?.Count>500)throw new InvalidDataException("Unsupported snapshot");return result with{Accepted=accepted};
+    }
+    public async Task<AccountInfo> InspectAccount(Export export,string token,CancellationToken cancel=default)
+    {
+        if(!export.Enabled)throw new InvalidDataException("Enable sharing first");
+        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(cancel);timeout.CancelAfter(TimeSpan.FromSeconds(30));cancel=timeout.Token;
+        using var request=new HttpRequestMessage(HttpMethod.Get,"v1/account");request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",token);
+        using var response=await http.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,cancel).ConfigureAwait(false);response.EnsureSuccessStatusCode();
+        if(response.Content.Headers.ContentLength>4096)throw new InvalidDataException("Account response too large");
+        await using var stream=await response.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false);
+        using var buffer=new MemoryStream();var chunk=new byte[1024];int length;
+        while((length=await stream.ReadAsync(chunk,cancel).ConfigureAwait(false))>0){if(buffer.Length+length>4096)throw new InvalidDataException("Account response too large");buffer.Write(chunk,0,length);}
+        var account=System.Text.Json.JsonSerializer.Deserialize<AccountInfo>(buffer.ToArray(),Protocol.Json);
+        if(account is null || account.Client!=export.Client || account.Actor!=export.Actor || account.Community!=export.Community
+            || string.IsNullOrWhiteSpace(account.Id) || account.Id.Length>64)throw new InvalidDataException("Credential scope mismatch");
+        return account;
+    }
+    public async Task DeleteAccount(Export export,string token,CancellationToken cancel=default)
+    {
+        await InspectAccount(export,token,cancel).ConfigureAwait(false);
+        using var request=new HttpRequestMessage(HttpMethod.Delete,"v1/account");request.Headers.Authorization=new AuthenticationHeaderValue("Bearer",token);
+        using var response=await http.SendAsync(request,cancel).ConfigureAwait(false);response.EnsureSuccessStatusCode();
     }
     public void Dispose()=>http.Dispose();
 }

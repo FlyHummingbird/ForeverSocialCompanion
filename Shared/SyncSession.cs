@@ -35,7 +35,12 @@ public sealed class SyncSession
         if (clean.Select(Protocol.Key).Distinct(StringComparer.Ordinal).Count() != clean.Count)
             throw new InvalidDataException("Duplicate snapshot records");
         snapshot = snapshot with { Records = clean };
-        var content = Digest(clean);
+        var published=(snapshot.Published ?? []).Select(r=>Protocol.Validate(r,now)).ToList();
+        if(published.Count>500 || published.Any(r=>r.Kind!="posts" || Protocol.Field(r.Record,"author")!=export.Actor)
+            || published.Select(Protocol.Key).Distinct(StringComparer.Ordinal).Count()!=published.Count)
+            throw new InvalidDataException("Invalid publication acknowledgements");
+        snapshot=snapshot with{Published=published};
+        var content = Digest(clean)+":"+Digest(published);
         if (File.Exists(path) && new FileInfo(path).Length > Protocol.MaxFileBytes) throw new InvalidDataException("Snapshot file too large");
         var fileHash = File.Exists(path) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))) : null;
         var changed = scope != lastScope || content != lastSnapshot || fileHash is null ||

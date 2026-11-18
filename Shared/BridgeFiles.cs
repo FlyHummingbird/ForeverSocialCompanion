@@ -45,6 +45,15 @@ public static class BridgeFiles
         builder.Append(SavedVariables.Quote(endpoint.AbsoluteUri.TrimEnd('/'))).Append(",actor=").Append(SavedVariables.Quote(actor)).Append(",client=").Append(SavedVariables.Quote(client));
         builder.Append(",fetchedAt=").Append(snapshot.FetchedAt).Append(",records={\n");
         foreach(var candidate in snapshot.Records){var record=Protocol.Validate(candidate,DateTimeOffset.UtcNow.ToUnixTimeSeconds());builder.Append(SavedVariables.Quote(Protocol.EncodeWire(record))).Append(",\n");}
+        builder.Append("},published={\n");
+        var published=snapshot.Published ?? [];
+        if(published.Count>500)throw new InvalidDataException("Too many acknowledgements");
+        var seen=new HashSet<string>(StringComparer.Ordinal);
+        foreach(var candidate in published){
+            var record=Protocol.Validate(candidate,DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            if(record.Kind!="posts" || Protocol.Field(record.Record,"author")!=actor || !seen.Add(Protocol.Key(record)))throw new InvalidDataException("Invalid acknowledgement");
+            builder.Append(SavedVariables.Quote(Protocol.EncodeWire(record))).Append(",\n");
+        }
         builder.Append("}}\n");if(Encoding.UTF8.GetByteCount(builder.ToString())>Protocol.MaxFileBytes)throw new InvalidDataException("Snapshot too large");
         // The main addon's declared data slot is the only game file written.
         WriteAtomic(path,builder.ToString());
