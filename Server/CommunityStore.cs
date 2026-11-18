@@ -54,6 +54,7 @@ public sealed class CommunityStore : IDisposable
         if(clean.Any(r=>Protocol.Field(r.Record,"author")!=account.Actor))throw new UnauthorizedAccessException();
         if(account.Client=="forever" && clean.Any(r=>r.Kind is "ratings" or "follows" && !Protocol.Field(r.Record,"target").EndsWith("-"+account.Community,StringComparison.Ordinal)))throw new InvalidDataException("Unsupported target community");
         lock(gate){
+            if(!state.Accounts.Values.Any(a=>a.Id==account.Id))throw new UnauthorizedAccessException();
             var next=new Dictionary<string,StoredRecord>(state.Records);var accepted=0;
             foreach(var row in clean){
                 var key=account.Client+":"+Protocol.Key(row);var old=next.GetValueOrDefault(key);
@@ -74,12 +75,17 @@ public sealed class CommunityStore : IDisposable
     public Snapshot Snapshot(Account account,long now)
     {
         lock(gate){
+            if(!state.Accounts.Values.Any(a=>a.Id==account.Id))throw new UnauthorizedAccessException();
             var records=state.Records.Values.Where(r=>r.Client==account.Client && (account.Client!="forever" || r.Community==account.Community) && (r.Wire.Kind is "posts" or "comments" or "listings" ? Protocol.Stamp(r.Wire.Record,"created") : Protocol.Stamp(r.Wire.Record,"updated"))>=now-30*86400)
                 .OrderBy(r=>Array.IndexOf(Protocol.Kinds,r.Wire.Kind)).ThenByDescending(r=>Protocol.Stamp(r.Wire.Record,"updated"))
                 .GroupBy(r=>r.Wire.Kind).SelectMany(g=>g.Take(g.Key=="profiles"?300:g.Key=="posts"?300:150)).Select(r=>r.Wire).Take(1500).ToList();
             var posts=records.Where(r=>r.Kind=="posts" && !r.Record.GetProperty("deleted").GetBoolean()).Select(r=>Protocol.Field(r.Record,"id")).ToHashSet();
             records.RemoveAll(r=>r.Kind is "comments" or "likes" && !posts.Contains(Protocol.Field(r.Record,"post")));
-            return new Snapshot(1,now,records,0);
+            var published=state.Records.Values.Where(r=>r.Owner==account.Id && r.Wire.Kind=="posts"
+                && Protocol.Stamp(r.Wire.Record,"created")>=now-30*86400)
+                .OrderByDescending(r=>Protocol.Stamp(r.Wire.Record,"updated")).ThenBy(r=>Protocol.Key(r.Wire),StringComparer.Ordinal)
+                .Take(500).Select(r=>r.Wire).ToList();
+            return new Snapshot(1,now,records,0,published);
         }
     }
     public void Delete(Account account){lock(gate){var accounts=state.Accounts.Where(p=>p.Value.Id!=account.Id).ToDictionary();var records=state.Records.Where(p=>p.Value.Owner!=account.Id).ToDictionary();Save(new State(1,accounts,records));}}
