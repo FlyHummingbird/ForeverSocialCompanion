@@ -2,7 +2,7 @@ using System.Net;
 using System.Text.Json;
 using ForeverSocial.Companion;
 
-internal sealed class CompanionWindow : Form
+internal sealed partial class CompanionWindow : Form
 {
     private static bool German => System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "de";
     private static string T(string de, string en) => German ? de : en;
@@ -26,7 +26,7 @@ internal sealed class CompanionWindow : Form
     private readonly ContextMenuStrip trayMenu = new();
     private readonly ToolStripMenuItem trayAutomatic;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly SyncSession session = new();
+    private SyncSession session = new();
     private readonly CompanionServices services;
     private readonly Func<IWin32Window, string?> chooseFolder;
     private readonly string config;
@@ -91,6 +91,7 @@ internal sealed class CompanionWindow : Form
             Text=T("Im Addon /fs companion öffnen, Freigabe aktivieren und /reload ausführen. Danach hier „Jetzt abgleichen“ wählen. Ein Einladungscode ist nicht erforderlich.",
                 "Open /fs companion in the addon, enable sharing and use /reload. Then choose Sync now here. No invitation code is required.") });
         var recent = historyPanel = Card(T("LETZTE AKTIVITÄTEN", "RECENT ACTIVITY"));historyPanel.Name="historyPanel"; recent.Controls.Add(activity); layout.Controls.Add(recent);historyPanel.Visible=false;
+        BuildAccessPanel(layout,links);
         layout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(740, 0), Margin = new Padding(0, 9, 0, 0), ForeColor = Muted,
             Text = T("Nur freigegebene öffentliche Inhalte werden übertragen. Private Notizen, Begegnungen und Blocklisten bleiben privat. Minimieren lässt die App im Infobereich weiterlaufen; X beendet sie.", "Only permitted public content is transferred. Private notes, encounters and block lists stay private. Minimize to keep the app running in the system tray; X exits it.") });
         foreach (var box in new TextBox[] { folder, endpoint }) { box.BackColor = Color.FromArgb(32, 37, 46); box.ForeColor = ForeColor; box.BorderStyle = BorderStyle.FixedSingle; }
@@ -218,11 +219,14 @@ internal sealed class CompanionWindow : Form
     {
         if (busy || closing) return;
         busy = true;
-        foreach (var control in new Control[] { synchronize, register, browse, folder, endpoint, characters }) control.Enabled = false;
+        SetAccessBusy(true);
         try
         {
             if (!ReadCharacters() || Selected() is not { } export) {ShowSetup(true);return;}
             var root = BridgeFiles.ClientRoot(folder.Text); var uri = BridgeFiles.Endpoint(endpoint.Text);
+            if(preferences.RetiredScopes.Contains(AccessScope(uri,export),StringComparer.Ordinal)){
+                SetStatus(T("Dieser Serverzugang wurde gelöscht. Unter Zugang verwalten bewusst erneut verbinden oder einen bestehenden Zugang übernehmen.","This server account was deleted. Use Manage access to deliberately reconnect or import existing access."));return;
+            }
             var token = services.LoadCredential(uri, export);
             // Validate the installed data slot before creating a server account.
             BridgeFiles.SnapshotPath(root);
@@ -275,7 +279,7 @@ internal sealed class CompanionWindow : Form
             nextPoll = services.Now().AddMilliseconds(Math.Min(300000, (double)timer.Interval * (1 << Math.Max(0, failures - 1))));
             if (!closing)
             {
-                foreach (var control in new Control[] { synchronize, register, browse, folder, endpoint, characters }) control.Enabled = true;
+                SetAccessBusy(false);
                 if (automatic.Checked && failures > 0) automaticState.Text = T("Automatischer neuer Versuch ab ", "Automatic retry from ") + nextPoll.ToLocalTime().ToString("HH:mm:ss");
                 else if (automatic.Checked) automaticState.Text = T("Automatik aktiv · nächster Abgleich ab ", "Automatic sync active · next check from ") + nextPoll.ToLocalTime().ToString("HH:mm:ss");
             }
