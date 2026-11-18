@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Server/Dockerfile
-    image: foreversocial-api:1.1.0
+    image: foreversocial-api:1.2.0
     container_name: foreversocial-api
     restart: unless-stopped
     environment:

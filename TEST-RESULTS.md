@@ -1,21 +1,49 @@
-# Companion 1.3.0 verification — 2026-11-16
+# Companion 1.4.0 / API 1.2.0 verification — 2026-11-18
 
-Builds completed with zero warnings and errors using .NET 10 SDK.
+Builds completed with zero warnings/errors under .NET 10. Tests use synthetic
+accounts and isolated settings. No real player records were uploaded.
 
-| Suite | Result | Scope |
-| --- | --- | --- |
-| C# core | 40/40 | Parsing, validation, storage, invitation-free payloads, disabled-export refusal, existing claims, scoped sync, cache/migration |
-| Windows components | 80/80 | Actual English/German Forms handlers and timers, first connection without a code, obsolete settings, existing access, no background enrollment, late exports, conflicts, minimized polling and retry/cancel behavior |
-| Real local enrollment API | 11/11 | Consent/scope validation, open enrollment, conflicts, bearer protection, unchanged format-1 data, restart, 429 throttling and authenticated deletion |
-| Real API background integration | 6/6 | Two synthetic accounts and actual minimized Forms timer; remote updates with unchanged local exports and restart |
-| Local addon/API integration | 13/13 groups | Shipped Lua modules under mocked WoW, both clients and locales, public content lifecycle and privacy |
-| Public HTTPS enrollment | 7/7 | API 1.1.0, no invitation, protected operations, duplicate refusal, synthetic upload/download and cleanup |
-| Public HTTPS addon/API integration | 13/13 groups | Same complete content lifecycle through the deployed API with synthetic actors, cleaned up afterwards |
+| Suite | Result |
+| --- | --- |
+| unit | 47/47 |
+| windows-ui | 102/102 |
+| enrollment | 15/15 |
+| background | 6/6 |
+| access | 6/6 |
+| e2e | 13/13 |
+| e2e-public | 13/13 |
+| public-https | 9/9 |
 
-The actual single-file EXE was started with its bundled runtime and Forms library using an external test-only startup hook. It checked the STA entry point and constructed a real window with isolated settings; no personal settings or network were used. This hook is not distributed. The portable package contains one EXE and seven small help, privacy, integrity and license files, without loose DLLs.
+Core tests cover parsing, validation, atomic storage, access scopes, consent,
+existing claims, encrypted transfer, tampering, publication receipts, feed caps,
+cache rewrites and revoked in-flight account objects. Windows tests exercise actual
+English/German Forms handlers, timers, busy/cancel/retry behavior, account actions,
+encrypted backup/import, deletion guards and safe file destinations.
 
-The runtime archive is checked against its SHA-256 manifest and scanned with Microsoft Defender. A clean scan is not a signature or a guarantee against SmartScreen warnings. The current EXE is unsigned.
+Real local API tests check consent, authentication, account metadata, exact stored
+receipts, conflicts, persistence and rate limits. Separate real HTTP + Forms runs
+exercise background polling and access export/import/deletion across app instances.
+Local and public integrations use shipped Lua modules under mocked WoW plus the
+actual C# file bridge: profiles, posts, mentions, replies, likes, private drafts,
+temporary mute, reviews, follows, groups and content lifecycle. Public HTTPS keeps
+normal certificate validation and synthetic accounts are removed afterwards.
 
-API 1.1.0 is deployed on Unraid with the original data volume, network and container restrictions. A private backup and the stopped previous container are retained for rollback. Existing accounts remain valid. Registration is open but does not verify WoW character ownership. No real player data was uploaded by these tests.
+The actual single-file EXE was started with its bundled runtime and Forms library
+through an external test-only startup hook. STA and a real first-run window were
+checked without personal settings/network. The hook is not distributed. Portable
+layout: one EXE plus seven small help, privacy, integrity and license files; no
+loose DLLs. Its ZIP passed Microsoft Defender without changing security settings.
+The executable remains unsigned; this is no guarantee against SmartScreen warnings.
 
-Reports are under TestArtifacts (development evidence, excluded from portable/source packages). The addon separately passed 2,967 Lua checks, 68 simulated network scenarios and 15 packaging groups. Real WoW rendering/import, native Explorer folder selection, and two-player gameplay remain manual checks. In-game import/export still requires /reload.
+API 1.2.0 runs on Unraid with the existing data, permissions, network and container
+limits. A private backup and the stopped previous container remain for rollback.
+Format 1 and existing credentials are preserved. Server accounts do not establish
+Blizzard character ownership.
+
+The addon separately passed 3,060 Lua checks, 68 simulated network scenarios and
+15 release groups. Native WoW rendering/import, real two-player gameplay and
+interactive Explorer/password dialogs remain manual checks. The bridge still
+requires /reload. Screenshot attachments are not implemented.
+
+Detailed private-development reports live in TestArtifacts and are excluded from
+portable and source ZIPs. Cryptography and privacy details: PRIVACY.md.
