@@ -1,4 +1,4 @@
-# Development and deployment — Companion 1.3.0 / API 1.1.0
+# Development and deployment — Companion 1.4.0 / API 1.2.0
 
 ## Setup
 
@@ -8,7 +8,7 @@ The export is editable local data. It signals consent but cannot prove ownership
 
 ## File bridge and background behavior
 
-The app reads only bounded account-global `ForeverSocialBridge` exports. WoW writes them at `/reload` or logout; in-memory edits are unavailable before then. Only permitted public records are exported. Private notes, encounters, blocks, bookmarks and private follow/review history are excluded.
+The app reads only bounded account-global `ForeverSocialBridge` exports. WoW writes them at `/reload` or logout; in-memory edits are unavailable before then. Only permitted public records are exported. Private drafts, mutes, notes, encounters, blocks, bookmarks and private follow/review history are excluded.
 
 The main addon's TOC must declare `## X-ForeverSocial-Companion: 1` and `Data/Companion.lua`. This slot is validated before any enrollment or synchronization. Downloaded records are validated, quoted as data, and written atomically inside the main addon; remote Lua is never accepted or executed. A recognized old two-file data addon is backed up outside the game installation before migration. Unknown files and links are refused. SavedVariables are never written by the app.
 
@@ -26,6 +26,7 @@ dotnet run --project Tests/Tests.csproj --no-build
 dotnet run --project WindowsTests/WindowsTests.csproj -- --report TestArtifacts/windows-ui-results.json
 python Tests/enrollment_e2e.py
 python Tests/background_e2e.py
+python Tests/access_e2e.py
 ./Build-Release.ps1 -AllowUnsignedTest
 ```
 
@@ -43,8 +44,35 @@ API 1.1.0 removes the invitation gate. Deploy this API before using Companion 1.
 
 Create a persistent `data` directory owned by UID 1654 before `docker compose up -d --build`. Expose container port 8080 only through a trusted HTTPS proxy/tunnel. The dedicated `foreversocial_nw` network, read-only container filesystem, dropped capabilities, no-new-privileges, memory/PID limits and single-writer database remain in place. Back up data while the container is stopped before an upgrade; retain the previous image for rollback.
 
-API: `GET /health`, `POST /v1/enroll`, bearer-authenticated `POST /v1/records`, `GET /v1/snapshot`, `DELETE /v1/account`. Enrollment requires `{format:1, enabled:true, client, actor, community}`. These client assertions are not identity verification. No token is returned for an already claimed name. Other operations still require the issued 256-bit bearer token; the server stores only its hash and binds writes to its account/author. Records are scoped by client and supported Forever community. Counts are bounded (1,000 accounts, 10,000 records, 1,500 records/account), with 30-day content retention.
+API: `GET /health`, `POST /v1/enroll`, bearer-authenticated `POST /v1/records`, `GET /v1/snapshot`, `GET /v1/account`, `DELETE /v1/account`. Enrollment requires `{format:1, enabled:true, client, actor, community}`. These client assertions are not identity verification. No token is returned for an already claimed name. Other operations still require the issued 256-bit bearer token; the server stores only its hash and binds writes to its account/author. Records are scoped by client and supported Forever community. Counts are bounded (1,000 accounts, 10,000 records, 1,500 records/account), with 30-day content retention.
 
 Enrollment has a shared fixed-window budget of 20 attempts/minute (including invalid requests); other API operations retain 120 requests/minute per authenticated account or connection address. No untrusted forwarded-IP header is used. This is basic flood mitigation, not proof of personhood or central moderation. CommunityStore currently uses an atomic bounded JSON database and a process lock, not MariaDB or multiple replicas.
 
 Code: MIT. Runtime libraries retain Microsoft's licenses and third-party notices.
+
+## API 1.2.0 and Companion 1.4.0
+
+Database format 1 and existing bearer tokens are preserved. `GET /v1/account`
+returns only the authenticated account's id/client/actor/community. Both inspection
+and deletion require the existing bearer and request rate limit. Store operations
+recheck account existence under the storage lock to stop an already-authenticated
+in-flight upload from resurrecting records after deletion.
+
+Snapshots optionally include `published`, up to 500 actual account-owned post wire
+records independent of the capped community list. It is not an assertion supplied
+by an upload request. The client validates ownership, type, revisions and duplicate
+IDs before any write. Both public content and acknowledgement digests control cache
+rewrites. Old consumers ignore this extra field; missing fields give no receipt.
+
+`AccessTransfer` uses .NET AES-GCM with a specified 16-byte tag and static
+`Rfc2898DeriveBytes.Pbkdf2` (SHA-256, 600,000 rounds, 32-byte key). It has bounded
+format/KDF parameters, random salt/nonce and fixed associated format data. It never
+executes imported content. Password work runs outside the Forms thread; credential
+and destructive actions share the synchronization busy guard. Native password,
+file and deletion dialogs are owned by the main STA window; test seams are only
+constructor-injected and no production CLI credential overrides exist.
+
+Sources checked: [AES-GCM constructor](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.aesgcm.-ctor?view=net-10.0)
+and [.NET 10 PBKDF2 guidance](https://learn.microsoft.com/en-us/dotnet/fundamentals/syslib-diagnostics/syslib0060).
+The encrypted file grants shared account access, not separate per-device revocation
+or a Blizzard identity claim. See PRIVACY.md and USER-README.md.
