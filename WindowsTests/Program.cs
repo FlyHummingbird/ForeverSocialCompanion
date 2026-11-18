@@ -13,6 +13,7 @@ internal static class WindowsRegressionTests
     [STAThread]
     private static int Main(string[] args)
     {
+        if(args is ["--access-http",var accessRoot,var accessEndpoint,var accessReport])return AccessHttpProbe.Run(accessRoot,accessEndpoint,accessReport);
         if(args is ["--background-http",var fixtureRoot,var testEndpoint,var backgroundReport])return LoopbackBackgroundProbe.Run(fixtureRoot,testEndpoint,backgroundReport);
         if(args is ["--inspect-game",var gameRoot]){
             using var window=new CompanionWindow(_=>null,Path.Combine(Path.GetTempPath(),"ForeverSocial-probe-"+Guid.NewGuid().ToString("N")+".json"));
@@ -92,6 +93,7 @@ internal static class WindowsRegressionTests
             File.WriteAllText(ExportFile(root),Export("forever").Replace("[\"savedAt\"]=1","[\"savedAt\"]="+savedAt,StringComparison.Ordinal)
                 .Replace("[\"records\"]={}","[\"records\"]={"+SavedVariables.Quote(Protocol.EncodeWire(record))+"}",StringComparison.Ordinal));
         }
+        string CompactSettings(string root){var config=Path.Combine(work,"compact-"+Guid.NewGuid().ToString("N")+".json");new CompanionSettings{Folder=root}.Save(config);return config;}
         Check("application entry point declares STA",()=>Assert(typeof(CompanionWindow).Assembly.EntryPoint?.GetCustomAttribute<STAThreadAttribute>() is not null));
         Check("actual Windows Forms thread and OLE initialize as STA",()=>Assert(Thread.CurrentThread.GetApartmentState()==ApartmentState.STA && Application.OleRequired()==ApartmentState.STA));
         foreach(var culture in new[]{"en-US","de-DE"}){
@@ -266,7 +268,7 @@ internal static class WindowsRegressionTests
                 Assert(!text.Contains("SERVER_SECRET",StringComparison.Ordinal) && !text.Contains(FakeCommunity.Token,StringComparison.Ordinal));
                 Assert(text.Contains(culture=="de-DE"?"ungültig":"invalid",StringComparison.Ordinal));
             });
-            string CompactSettings(string root){var config=Path.Combine(work,"compact-"+Guid.NewGuid().ToString("N")+".json");new CompanionSettings{Folder=root}.Save(config);return config;}
+
             Check(culture+": obsolete invitation references are ignored and removed on settings save",()=>{
                 var root=Client("forever");var config=CompactSettings(root);
                 File.WriteAllText(config,File.ReadAllText(config).TrimEnd()[..^1]+",\"invitationFile\":\"missing-private.txt\",\"invitationEndpoint\":\"https://old.example\"}");
@@ -334,6 +336,90 @@ internal static class WindowsRegressionTests
                 Assert(Control<ListBox>(window,"activity").Visible && !Control<TableLayoutPanel>(window,"setupPanel").Visible);
             });
         }
+        foreach(var culture in new[]{"en-US","de-DE"}){
+            CultureInfo.CurrentUICulture=CultureInfo.GetCultureInfo(culture);
+            var password="Private-transfer-password!";
+            var uri=new Uri("https://social.wgfreunde.com");
+            Check(culture+": access tools stay collapsed and do not send requests on opening",()=>{
+                var root=Client("forever");var server=new FakeCommunity();using var window=Window(_=>null,server.Services(),CompactSettings(root));
+                var card=Control<TableLayoutPanel>(window,"accessPanel");Assert(!card.Visible);
+                var link=Control<LinkLabel>(window,"accessToggle");typeof(LinkLabel).GetMethod("OnLinkClicked",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(link,[new LinkLabelLinkClickedEventArgs(new LinkLabel.Link())]);
+                Assert(card.Visible && server.AccountGets+server.Deletes+server.Enrolls+server.Downloads==0);
+            });
+            Check(culture+": access backup encrypts the credential without publishing or exposing it",()=>{
+                var root=Client("forever");var path=Path.Combine(work,Guid.NewGuid()+".fsaccess");var config=CompactSettings(root);var server=new FakeCommunity();
+                using var window=Window(_=>null,server.Services(accessFile:(_,_)=>path,password:(_,_)=>password),config);
+                Await(window.ManageAccessAsync("export"));Assert(File.Exists(path));var content=File.ReadAllText(path);
+                Assert(!content.Contains(FakeCommunity.Token,StringComparison.Ordinal) && !content.Contains("Alice-TestRealm",StringComparison.Ordinal));
+                var access=AccessTransfer.Unprotect(content,password);Assert(access.Actor=="Alice-TestRealm" && access.Token==FakeCommunity.Token);
+                Assert(server.AccountGets==1 && server.Uploads+server.Downloads+server.Enrolls==0 && !File.ReadAllText(config).Contains(FakeCommunity.Token,StringComparison.Ordinal));
+            });
+            Check(culture+": canceling access backup never creates a credential file",()=>{
+                var root=Client("forever");var path=Path.Combine(work,Guid.NewGuid()+".fsaccess");var server=new FakeCommunity();
+                using var window=Window(_=>null,server.Services(accessFile:(_,_)=>path,password:(_,_)=>null),CompactSettings(root));
+                Await(window.ManageAccessAsync("export"));Assert(!File.Exists(path) && server.Deletes==0 && !window.IsSynchronizing);
+            });
+            Check(culture+": importing access verifies server scope before storing a credential",()=>{
+                var root=Client("forever");var path=Path.Combine(work,Guid.NewGuid()+".fsaccess");
+                File.WriteAllText(path,AccessTransfer.Protect(new(uri.AbsoluteUri,"forever","Alice-TestRealm","TestRealm",FakeCommunity.Token),password));
+                var server=new FakeCommunity();using var window=Window(_=>null,server.Services(credential:false,accessFile:(_,_)=>path,password:(_,_)=>password),CompactSettings(root));
+                Await(window.ManageAccessAsync("import"));Assert(server.SavedToken==FakeCommunity.Token && server.AccountGets==1 && server.Enrolls+server.Uploads+server.Downloads==0);
+                Await(window.SynchronizeNowAsync());Assert(server.Downloads==1 && server.Enrolls==0);
+            });
+            Check(culture+": wrong password and mismatched character cannot replace credentials",()=>{
+                var root=Client("forever");var path=Path.Combine(work,Guid.NewGuid()+".fsaccess");
+                File.WriteAllText(path,AccessTransfer.Protect(new(uri.AbsoluteUri,"forever","Mira-TestRealm","TestRealm",FakeCommunity.Token),password));
+                var server=new FakeCommunity();using var window=Window(_=>null,server.Services(credential:false,accessFile:(_,_)=>path,password:(_,_)=>password),CompactSettings(root));
+                Await(window.ManageAccessAsync("import"));Assert(server.SavedToken is null && server.AccountGets==0);
+                File.WriteAllText(path,AccessTransfer.Protect(new(uri.AbsoluteUri,"forever","Alice-TestRealm","TestRealm",FakeCommunity.Token),"Another-password-value!"));
+                Await(window.ManageAccessAsync("import"));Assert(server.SavedToken is null && server.AccountGets==0 && !Control<Label>(window,"status").Text.Contains(FakeCommunity.Token,StringComparison.Ordinal));
+            });
+            Check(culture+": server scope mismatch rejects an otherwise valid access file",()=>{
+                var root=Client("forever");var path=Path.Combine(work,Guid.NewGuid()+".fsaccess");
+                File.WriteAllText(path,AccessTransfer.Protect(new(uri.AbsoluteUri,"forever","Alice-TestRealm","TestRealm",FakeCommunity.Token),password));
+                var server=new FakeCommunity{AccountActor="Mira-TestRealm"};using var window=Window(_=>null,server.Services(credential:false,accessFile:(_,_)=>path,password:(_,_)=>password),CompactSettings(root));
+                Await(window.ManageAccessAsync("import"));Assert(server.SavedToken is null && server.AccountGets==1 && server.Deletes==0);
+            });
+            Check(culture+": deletion confirmation can be canceled without network or preference changes",()=>{
+                var root=Client("forever");var config=CompactSettings(root);var before=File.ReadAllBytes(config);var server=new FakeCommunity();
+                using var window=Window(_=>null,server.Services(confirm:(_,_)=>false),config);
+                Await(window.ManageAccessAsync("delete"));Assert(server.Deletes+server.AccountGets==0 && before.SequenceEqual(File.ReadAllBytes(config)) && !server.CredentialDeleted);
+            });
+            Check(culture+": deletion revokes access clears imported data and prevents silent recreation after restart",()=>{
+                var root=Client("forever");var config=CompactSettings(root);WritePost(root);var server=new FakeCommunity();
+                using(var window=Window(_=>null,server.Services(confirm:(_,_)=>true),config)){
+                    Await(window.ManageAccessAsync("delete"));Assert(server.Deletes==1 && server.CredentialDeleted && !Control<CheckBox>(window,"automatic").Checked);
+                    Assert(!File.ReadAllText(Payload(root)).Contains("My public post",StringComparison.Ordinal));
+                    Await(window.SynchronizeNowAsync());Control<Button>(window,"synchronize").PerformClick();PumpUntil(()=>!window.IsSynchronizing);Assert(server.Enrolls+server.Uploads+server.Downloads==0);
+                }
+                using var reopened=Window(_=>null,server.Services(credential:false,confirm:(_,_)=>false),config);
+                Control<Button>(reopened,"synchronize").PerformClick();PumpUntil(()=>!reopened.IsSynchronizing);Assert(server.Enrolls==0);
+                Assert(CompanionSettings.Load(config).RetiredScopes.Count==1);
+                Await(reopened.ManageAccessAsync("reconnect"));Assert(CompanionSettings.Load(config).RetiredScopes.Count==1);
+            });
+            Check(culture+": failed server deletion remains retryable while automatic recreation is blocked",()=>{
+                var root=Client("forever");var config=CompactSettings(root);var server=new FakeCommunity{Failure=HttpStatusCode.ServiceUnavailable};
+                using var window=Window(_=>null,server.Services(confirm:(_,_)=>true),config);Await(window.ManageAccessAsync("delete"));
+                Assert(server.Deletes==0 && !server.CredentialDeleted && CompanionSettings.Load(config).RetiredScopes.Count==1);
+                server.Failure=null;Await(window.ManageAccessAsync("delete"));Assert(server.Deletes==1 && server.CredentialDeleted);
+            });
+            Check(culture+": access operations exclude overlapping sync and recover their controls",()=>{
+                var root=Client("forever");var server=new FakeCommunity{WaitForRelease=true};using var window=Window(_=>null,server.Services(confirm:(_,_)=>true),CompactSettings(root));
+                var pending=window.ManageAccessAsync("delete");PumpUntil(()=>window.IsSynchronizing);
+                Await(window.SynchronizeNowAsync());Assert(server.AccountGets==1 && !Control<Button>(window,"synchronize").Enabled);
+                server.Release.SetResult();Await(pending);Assert(server.Deletes==1 && Control<Button>(window,"synchronize").Enabled);
+            });
+        }
+        Check("access backups refuse game-file destinations without altering the data slot",()=>{
+            var root=Client("forever");var path=Payload(root);var before=File.ReadAllBytes(path);var server=new FakeCommunity();
+            using var window=Window(_=>null,server.Services(accessFile:(_,_)=>path,password:(_,_)=>"Private-transfer-password!"),CompactSettings(root));
+            Await(window.ManageAccessAsync("export"));Assert(before.SequenceEqual(File.ReadAllBytes(path)));
+        });
+        Check("oversized preferences cannot be persisted before a destructive server action",()=>{
+            var path=Path.Combine(work,"large-settings.json");var denied=false;
+            try{new CompanionSettings{RetiredScopes=Enumerable.Repeat(new string('x',600),100).ToList()}.Save(path);}catch(InvalidDataException){denied=true;}
+            Assert(denied && !File.Exists(path));
+        });
         // Fixtures are deliberately isolated; no real game or account paths are used.
         var result=new{generatedAtUTC=DateTimeOffset.UtcNow,passed=checks.Count-failed,total=checks.Count,
             checks,componentUiTests=true,nativeFolderDialogInteracted=false,
@@ -352,7 +438,10 @@ internal sealed class FakeCommunity
 {
     private static readonly long Epoch=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     internal const string Token="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    internal int Uploads,Downloads,Enrolls,EnrollmentAttempts;
+    internal int Uploads,Downloads,Enrolls,EnrollmentAttempts,AccountGets,Deletes;
+    internal string? SavedToken;
+    internal string AccountActor="Alice-TestRealm";
+    internal bool CredentialDeleted;
     internal Enrollment? LastEnrollment;
     internal HttpStatusCode? Failure;
     internal bool WaitForRelease,Canceled;
@@ -360,11 +449,13 @@ internal sealed class FakeCommunity
     private readonly Dictionary<string,WireRecord> rows=[];
     internal static WireRecord Post(string actor,string text)=>new("posts",JsonSerializer.SerializeToElement(new{id=actor+"@test",author=actor,created=Epoch-60,updated=Epoch,version=1,category="general",text,deleted=false},Protocol.Json));
     internal void AddPost(string actor,string text){var row=Post(actor,text);rows[Protocol.Key(row)]=row;}
-    internal CompanionServices Services(int interval=30000,bool credential=true,Func<DateTimeOffset>? now=null){
+    internal CompanionServices Services(int interval=30000,bool credential=true,Func<DateTimeOffset>? now=null,Func<IWin32Window,bool,string?>? accessFile=null,Func<IWin32Window,bool,string?>? password=null,Func<IWin32Window,string,bool>? confirm=null){
         var saved=new Dictionary<(string,string,string),string>();
         return new(){CreateClient=uri=>new SyncClient(uri,new Handler(this)),
-            LoadCredential=(uri,e)=>saved.GetValueOrDefault((uri.AbsoluteUri,e.Client,e.Actor)) ?? (credential?Token:null),
-            SaveCredential=(uri,e,token)=>saved[(uri.AbsoluteUri,e.Client,e.Actor)]=token,
+            LoadCredential=(uri,e)=>saved.GetValueOrDefault((uri.AbsoluteUri,e.Client,e.Actor)) ?? (credential && !CredentialDeleted?Token:null),
+            SaveCredential=(uri,e,token)=>{saved[(uri.AbsoluteUri,e.Client,e.Actor)]=token;SavedToken=token;},
+            DeleteCredential=(uri,e)=>{saved.Remove((uri.AbsoluteUri,e.Client,e.Actor));CredentialDeleted=true;},
+            AccessFile=accessFile ?? ((_,_)=>null),AccessPassword=password ?? ((_,_)=>null),ConfirmAccess=confirm ?? ((_,_)=>false),
             PollIntervalMilliseconds=interval,Now=now ?? (()=>DateTimeOffset.UtcNow)};
     }
     private sealed class Handler(FakeCommunity server):HttpMessageHandler
@@ -374,8 +465,13 @@ internal sealed class FakeCommunity
             var path=request.RequestUri!.AbsolutePath;
             if(path=="/v1/records")server.Uploads++;else if(path=="/v1/snapshot")server.Downloads++;
             if(path=="/v1/enroll")server.EnrollmentAttempts++;
+            if(path=="/v1/account" && request.Method==HttpMethod.Get)server.AccountGets++;
             if(server.Failure is { } failure)return new HttpResponseMessage(failure){Content=new StringContent("SERVER_SECRET")};
             if(server.WaitForRelease){try{await server.Release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);}catch(OperationCanceledException){server.Canceled=true;throw;}}
+            if(path=="/v1/account"){
+                if(request.Method==HttpMethod.Delete){server.Deletes++;return new(HttpStatusCode.NoContent);}
+                return new(HttpStatusCode.OK){Content=Body(new AccountInfo("synthetic-account","forever",server.AccountActor,"TestRealm"))};
+            }
             if(path=="/v1/records"){
                 var upload=(await request.Content!.ReadFromJsonAsync<Upload>(Protocol.Json,cancellationToken).ConfigureAwait(false))!;
                 foreach(var row in upload.Records)server.rows[Protocol.Key(row)]=row;
