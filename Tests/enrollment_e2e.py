@@ -25,7 +25,7 @@ log = (WORK / 'server.log').open('w', encoding='utf-8')
 def request(path, data=None, token=None, method=None):
     req = urllib.request.Request(endpoint + path,
         data=None if data is None else json.dumps(data).encode(), method=method,
-        headers={'Content-Type': 'application/json', 'User-Agent': 'ForeverSocialCompanion/1.3.0',
+        headers={'Content-Type': 'application/json', 'User-Agent': 'ForeverSocialCompanion/1.4.0',
                  **({'Authorization': 'Bearer ' + token} if token else {})})
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -87,6 +87,22 @@ try:
     forged = {'kind': 'posts', 'record': {'id': 'Beren-TestRealm@forged', 'author': 'Beren-TestRealm',
         'created': now, 'updated': now, 'version': 1, 'category': 'general', 'text': 'forged', 'deleted': False}}
     check('authenticated account cannot publish another author', request('/v1/records', {'records': [forged]}, token)[0] == 403)
+    info_code, info = request('/v1/account', token=token)
+    check('authenticated account metadata is scoped and never includes credentials',
+          info_code == 200 and info['actor'] == valid['actor'] and info['client'] == 'forever'
+          and info['community'] == 'TestRealm' and 'token' not in info)
+    check('account inspection requires a valid bearer', request('/v1/account')[0] == 401
+          and request('/v1/account', token='0' * 64)[0] == 401)
+    own = {'kind': 'posts', 'record': {'id': 'Alice-TestRealm@receipt', 'author': 'Alice-TestRealm',
+        'created': now, 'updated': now, 'version': 1, 'category': 'general', 'text': 'Receipt version one', 'deleted': False}}
+    assert request('/v1/records', {'records': [own]}, token)[0] == 200
+    receipt = request('/v1/snapshot', token=token)[1]['published']
+    check('snapshot acknowledges the exact stored post content', len(receipt) == 1 and receipt[0]['record']['text'] == own['record']['text'])
+    changed = {**own, 'record': {**own['record'], 'version': 2, 'text': 'Receipt version two'}}
+    assert request('/v1/records', {'records': [changed]}, token)[0] == 200
+    assert request('/v1/records', {'records': [own]}, token)[0] == 200
+    receipt = request('/v1/snapshot', token=token)[1]['published']
+    check('stale uploads cannot fabricate publication acknowledgement', receipt[0]['record']['version'] == 2 and receipt[0]['record']['text'] == 'Receipt version two')
     stop()
     start()
     check('unchanged format-1 database preserves pre-restart credentials', request('/v1/snapshot', token=token)[0] == 200)
@@ -100,9 +116,9 @@ try:
 finally:
     stop()
     log.close()
-    report = {'generatedAtUTC': datetime.now(timezone.utc).isoformat(), 'total': 11,
+    report = {'generatedAtUTC': datetime.now(timezone.utc).isoformat(), 'total': 15,
               'passed': len(checks), 'checks': checks, 'realPlayerRecordsUploaded': False,
               'sourceSHA256': {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                   for p in ROOT.rglob('*') if p.suffix in ('.cs', '.csproj', '.py')
                   and not {'bin', 'obj', 'dist', '.dotnet', 'TestArtifacts'}.intersection(p.relative_to(ROOT).parts)}}
-    (ROOT / 'TestArtifacts/enrollment-130-results.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    (ROOT / 'TestArtifacts/enrollment-140-results.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')

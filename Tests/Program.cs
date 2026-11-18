@@ -162,6 +162,67 @@ Check("snapshot data parser supports generated keys and still refuses function c
     Assert(SavedVariables.ParseSnapshot("ForeverSocialCompanionData={format=1,records={\"safe\"}} ")["format"].Equals(1L));
     foreach(var bad in new[]{"ForeverSocialCompanionData=os.execute(\"x\")","ForeverSocialCompanionData={format=1} os.execute(\"x\")","ForeverSocialCompanionData={records=function()end}"})Reject(()=>SavedVariables.ParseSnapshot(bad));
 });
+
+Check("encrypted access round trip uses random salt nonce and hides bearer data",()=>{
+    var access=new TransferredAccess(service.AbsoluteUri,"forever","Beren-TestRealm","TestRealm",new string('A',64));
+    var first=AccessTransfer.Protect(access,"Twelve-plus-password!");var second=AccessTransfer.Protect(access,"Twelve-plus-password!");
+    Assert(first!=second && !first.Contains(access.Token,StringComparison.Ordinal) && !first.Contains(access.Actor,StringComparison.Ordinal));
+    Assert(AccessTransfer.Unprotect(first,"Twelve-plus-password!")==access);
+});
+Check("wrong passwords altered tags and unsupported KDF parameters reject transfers",()=>{
+    var access=new TransferredAccess(service.AbsoluteUri,"forever","Beren-TestRealm","TestRealm",new string('B',64));
+    var encrypted=AccessTransfer.Protect(access,"Twelve-plus-password!");
+    void Denied(Action action){try{action();}catch(Exception e)when(e is InvalidDataException or System.Security.Cryptography.CryptographicException or FormatException or JsonException){return;}throw new Exception("Bad transfer accepted");}
+    Denied(()=>AccessTransfer.Unprotect(encrypted,"Wrong-password!!!"));
+    var parts=JsonSerializer.Deserialize<Dictionary<string,JsonElement>>(encrypted)!;parts["tag"]=JsonSerializer.SerializeToElement(Convert.ToBase64String(new byte[16]));
+    Denied(()=>AccessTransfer.Unprotect(JsonSerializer.Serialize(parts),"Twelve-plus-password!"));
+    Denied(()=>AccessTransfer.Unprotect(encrypted.Replace("600000","1",StringComparison.Ordinal),"Twelve-plus-password!"));
+    Denied(()=>AccessTransfer.Unprotect(new string('x',AccessTransfer.MaxBytes+1),"Twelve-plus-password!"));
+    Denied(()=>AccessTransfer.Protect(access,"short"));
+});
+Check("transfers bind endpoint client character community and explicit addon consent",()=>{
+    var export=OwnExport();var access=new TransferredAccess(service.AbsoluteUri,export.Client,export.Actor,export.Community,new string('C',64));
+    AccessTransfer.Match(access,service,export);
+    Reject(()=>AccessTransfer.Match(access,new Uri("https://another.example"),export));
+    Reject(()=>AccessTransfer.Match(access,service,export with{Actor="Mira-TestRealm"}));
+    Reject(()=>AccessTransfer.Match(access,service,export with{Client="retail"}));
+    Reject(()=>AccessTransfer.Match(access,service,export with{Enabled=false}));
+});
+Check("publication receipts preserve actual stored revisions after stale or terminal updates",()=>{
+    using var store=new CommunityStore(Path.Combine(temp,"receipts"));var account=store.Authenticate(store.Enroll("forever","Beren-TestRealm").Token)!;
+    store.Upload(account,[Post(version:2)],now);store.Upload(account,[Post()],now);
+    var snapshot=store.Snapshot(account,now);Assert(snapshot.Published?.Count==1 && Protocol.Stamp(snapshot.Published[0].Record,"version")==2);
+    store.Upload(account,[Post(version:3,deleted:true)],now);store.Upload(account,[Post(version:4)],now);
+    snapshot=store.Snapshot(account,now);Assert(snapshot.Published![0].Record.GetProperty("deleted").GetBoolean());
+    var other=store.Authenticate(store.Enroll("forever","Mira-TestRealm").Token)!;Assert(store.Snapshot(other,now).Published?.Count==0);
+});
+Check("own acknowledgements remain available beyond the public feed cap",()=>{
+    using var store=new CommunityStore(Path.Combine(temp,"receipt-cap"));var account=store.Authenticate(store.Enroll("retail","Beren-TestRealm").Token)!;
+    var foreign=store.Authenticate(store.Enroll("retail","Mira-TestRealm").Token)!;
+    store.Upload(account,[Post()],now);
+    for(var batch=0;batch<4;batch++){
+        var rows=Enumerable.Range(batch*90,90).Select(index=>{
+            var data=JsonSerializer.Deserialize<Dictionary<string,JsonElement>>(Post("Mira-TestRealm").Record.GetRawText())!;
+            data["id"]=JsonSerializer.SerializeToElement("Mira-TestRealm@cap-"+index);data["updated"]=JsonSerializer.SerializeToElement(now+1);
+            return new WireRecord("posts",JsonSerializer.SerializeToElement(data));}).ToList();store.Upload(foreign,rows,now);
+    }
+    var snapshot=store.Snapshot(account,now);Assert(snapshot.Records.Count==300 && snapshot.Records.All(r=>Protocol.Field(r.Record,"author")!="Beren-TestRealm"));
+    Assert(snapshot.Published?.Single().Record.GetProperty("id").GetString()=="Beren-TestRealm@test");
+});
+Check("changed receipts rewrite cache even when the public snapshot is identical",()=>{
+    var root=ClientFolder("receipt-session");var handler=new SyncHandler{Published=[Post()]};using var client=new SyncClient(service,handler);var session=new SyncSession();
+    session.Synchronize(root,OwnExport(),service,"synthetic",client).GetAwaiter().GetResult();
+    handler.Published=[Post(version:2,text:"Server revision")];
+    var result=session.Synchronize(root,OwnExport(),service,"synthetic",client).GetAwaiter().GetResult();
+    Assert(result.DataChanged && !result.Uploaded && File.ReadAllText(BridgeFiles.SnapshotPath(root)).Contains("Server revision",StringComparison.Ordinal));
+    handler.Published=[Post("Mira-TestRealm")];var original=File.ReadAllBytes(BridgeFiles.SnapshotPath(root));
+    Reject(()=>session.Synchronize(root,OwnExport(),service,"synthetic",client).GetAwaiter().GetResult());Assert(original.SequenceEqual(File.ReadAllBytes(BridgeFiles.SnapshotPath(root))));
+});
+Check("revoked in-flight account objects cannot resurrect orphan records",()=>{
+    using var store=new CommunityStore(Path.Combine(temp,"inflight-delete"));var credential=store.Enroll("forever","Beren-TestRealm");var account=store.Authenticate(credential.Token)!;
+    store.Delete(account);Reject(()=>store.Upload(account,[Post()],now));Reject(()=>store.Snapshot(account,now));
+    var fresh=store.Authenticate(store.Enroll("forever","Beren-TestRealm").Token)!;Assert(store.Snapshot(fresh,now).Records.Count==0);
+});
 var report=new{generatedAtUTC=DateTimeOffset.UtcNow,total=checks.Count,passed=checks.Count-failures,checks};Directory.CreateDirectory("TestArtifacts");File.WriteAllText("TestArtifacts/unit-results.json",JsonSerializer.Serialize(report,Protocol.Json));
 Environment.ExitCode=failures==0?0:1;
 
@@ -171,6 +232,7 @@ sealed class SyncHandler:HttpMessageHandler
     internal bool FailOnce;
     internal string? EnrollmentBody;
     internal List<WireRecord> Records=[];
+    internal List<WireRecord>? Published;
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)
     {
         if(request.Method==HttpMethod.Post)Posts++;else Gets++;
@@ -181,6 +243,6 @@ sealed class SyncHandler:HttpMessageHandler
         }
         return new HttpResponseMessage(HttpStatusCode.OK){Content=request.Method==HttpMethod.Post
             ?JsonContent.Create(new{accepted=0},options:Protocol.Json)
-            :JsonContent.Create(new Snapshot(1,DateTimeOffset.UtcNow.ToUnixTimeSeconds(),Records,0),options:Protocol.Json)};
+            :JsonContent.Create(new Snapshot(1,DateTimeOffset.UtcNow.ToUnixTimeSeconds(),Records,0,Published),options:Protocol.Json)};
     }
 }

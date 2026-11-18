@@ -10,7 +10,7 @@ endpoint=os.environ.get('FS_TEST_URL','http://127.0.0.1:18891')
 checks=[]
 def request(path,data=None,token=None,method=None):
     body=None if data is None else json.dumps(data,ensure_ascii=False).encode()
-    req=urllib.request.Request(endpoint+path,data=body,method=method,headers={'Content-Type':'application/json','User-Agent':'ForeverSocialCompanion/1.3.0',**({'Authorization':'Bearer '+token} if token else {})})
+    req=urllib.request.Request(endpoint+path,data=body,method=method,headers={'Content-Type':'application/json','User-Agent':'ForeverSocialCompanion/1.4.0',**({'Authorization':'Bearer '+token} if token else {})})
     with urllib.request.urlopen(req,timeout=20) as response:return json.loads(response.read() or b'null')
 def table(value):
     if isinstance(value,str):return '"'+value.replace('\\','\\\\').replace('"','\\"').replace('\n','\\n')+'"'
@@ -58,6 +58,9 @@ try:
         for locale in ('enUS','deDE'):
             suffix=secrets.token_hex(3);aname='A'+suffix;bname='B'+suffix
             a,na=vm(client,locale,aname);b,nb=vm(client,locale,bname)
+            # Both clients must exist before this synthetic post is created.
+            # Freeze creation at a shared time after both inbox opt-in boundaries.
+            shared_now=int(time.time());a.globals().MOCK.now=shared_now;b.globals().MOCK.now=shared_now
             ar=WORK/(client+locale+'A')/('_forever_' if client=='forever' else '_retail_');br=WORK/(client+locale+'B')/ar.name
             for root in (ar,br):
                 slot=root/'Interface/AddOns/ForeverSocial/Data';slot.mkdir(parents=True)
@@ -67,34 +70,42 @@ try:
             ca=request('/v1/enroll',{'format':1,'enabled':True,'client':client,'actor':na.App.actor});cb=request('/v1/enroll',{'format':1,'enabled':True,'client':client,'actor':nb.App.actor})
             try:
                 na.Social.SaveProfile(na.Social,a.table_from({'public':True,'bio':'\U0001F600'*500,'activities':'\U0001F600'*120}))
-                post=na.Social.CreatePost(na.Social,'Grüße, ein gemeinsamer Serverbeitrag! \U0001F600 \u2028','general');assert not isinstance(post,tuple),post
+                post=na.Social.CreatePost(na.Social,'Grüße, ein gemeinsamer Serverbeitrag! \U0001F600 \u2028 @'+nb.App.actor,'general');assert not isinstance(post,tuple),post
                 listing=na.Social.CreateListing(na.Social,'Stratholme','TANK,HEALER','Eine gemeinsame Gruppe','20:00');assert not isinstance(listing,tuple),listing
                 na.Social.RecordEncounter(na.Social,nb.App.actor);na.Notes.Save(na.Notes,nb.App.actor,'PRIVATE_E2E_SECRET')
+                na.Comfort.SavePostDraft(na.Comfort,'PRIVATE_DRAFT_SECRET','trade')
+                na.Comfort.SaveCommentDraft(na.Comfort,post.id,'PRIVATE_REPLY_SECRET')
+                assert na.Comfort.PostStatus(na.Comfort,post)=='POST_WAITING_COMPANION'
                 sync(a,na,ar,ca['token']);sync(b,nb,br,cb['token'])
+                assert na.Comfort.PostStatus(na.Comfort,post)=='POST_SERVER_SAVED'
+                assert any(row.kind=='posts' and row.post==post.id for _,row in nb.Inbox.Rows(nb.Inbox).items())
                 remote=nb.App.db.posts[post.id];assert remote and remote.provenance=='backend';assert remote.text==post.text
                 assert nb.Social.GetProfile(nb.Social,na.App.actor).bio=='\U0001F600'*500
                 nb.Social.AddComment(nb.Social,post.id,'Antwort vom zweiten Client');nb.Social.ToggleLike(nb.Social,post.id)
                 sync(b,nb,br,cb['token']);sync(a,na,ar,ca['token'])
                 assert na.Social.LikeCount(na.Social,post.id)==1
                 assert len(na.Social.Comments(na.Social,post.id))==1
-                raw=json.dumps(request('/v1/snapshot',token=ca['token']),ensure_ascii=False);assert 'PRIVATE_E2E_SECRET' not in raw
+                raw=json.dumps(request('/v1/snapshot',token=ca['token']),ensure_ascii=False);assert all(secret not in raw for secret in ('PRIVATE_E2E_SECRET','PRIVATE_DRAFT_SECRET','PRIVATE_REPLY_SECRET'))
                 bad={'records':[{'kind':'posts','record':{'id':nb.App.actor+'@forged','author':nb.App.actor,'created':int(time.time()),'updated':int(time.time()),'version':1,'category':'general','text':'forged','deleted':False}}]}
                 try:request('/v1/records',bad,ca['token']);raise AssertionError('Foreign author accepted')
                 except urllib.error.HTTPError as e:assert e.code==403,e.code
-                checks.append({'name':client+':'+locale+':two-way C# file bridge, Unicode, comments, likes, privacy, author binding','ok':True})
+                checks.append({'name':client+':'+locale+':two-way C# bridge, exact receipts, mentions, Unicode, replies, likes, private drafts, author binding','ok':True})
                 assert nb.App.db.listings[listing.id].provenance=='backend'
                 assert not nb.Social.CanRate(nb.Social,na.App.actor),'A listing must not create an encounter proof'
                 nb.Social.RecordEncounter(nb.Social,na.App.actor)
                 scores=b.table_from({'friendly':5,'teamwork':4,'reliable':5,'helpful':4})
                 rating=nb.Social.Rate(nb.Social,na.App.actor,scores,'Danke für die Gruppe','helpful,leader');assert not isinstance(rating,tuple),rating
                 assert nb.Social.Follow(nb.Social,na.App.actor) is True
+                assert nb.Comfort.Mute(nb.Comfort,na.App.actor,1) is True
+                assert len(nb.Social.Feed(nb.Social,'following'))==0 and nb.Social.IsFollowing(nb.Social,na.App.actor) is True
+                assert nb.Comfort.Mute(nb.Comfort,na.App.actor,0) is True
                 assert nb.Social.SetShareFollows(nb.Social,True) is True
                 sync(b,nb,br,cb['token']);sync(a,na,ar,ca['token'])
                 assert na.App.db.ratings[rating.id].provenance=='backend'
                 assert na.Social.RatingSummary(na.Social,na.App.actor).count==1
                 assert na.Social.RatingSummary(na.Social,na.App.actor).awards.leader==1
                 assert na.Social.ProfileStats(na.Social,na.App.actor).followers==1
-                checks.append({'name':client+':'+locale+':reviews, awards, public follows and group listings; listings do not unlock reviews','ok':True})
+                checks.append({'name':client+':'+locale+':reviews, awards, public follows, temporary mute and groups; listings do not unlock reviews','ok':True})
                 scores.friendly=3
                 updated=nb.Social.Rate(nb.Social,na.App.actor,scores,'Aktualisierte Meinung','friendly');assert not isinstance(updated,tuple),updated
                 assert updated.id==rating.id and updated.version>rating.version

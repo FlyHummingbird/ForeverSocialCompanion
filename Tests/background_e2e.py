@@ -23,7 +23,7 @@ env = {**os.environ, 'FS_DATA': str(WORK / 'database'),
 def request(path, data=None):
     req = urllib.request.Request(endpoint + path,
         data=None if data is None else json.dumps(data).encode(),
-        headers={'Content-Type': 'application/json', 'User-Agent': 'ForeverSocialCompanion/1.3.0'})
+        headers={'Content-Type': 'application/json', 'User-Agent': 'ForeverSocialCompanion/1.4.0'})
     with urllib.request.urlopen(req, timeout=10) as result:
         return json.load(result)
 
