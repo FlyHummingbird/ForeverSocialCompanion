@@ -23,6 +23,9 @@ jobs:
       - name: Real local API and background timer integration
         shell: pwsh
         run: python Tests/background_e2e.py
+      - name: Encrypted access transfer and account deletion integration
+        shell: pwsh
+        run: python Tests/access_e2e.py
       - name: Build explicitly unsigned test artifact
         shell: pwsh
         run: ./Build-Release.ps1 -AllowUnsignedTest
