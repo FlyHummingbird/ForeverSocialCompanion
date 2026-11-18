@@ -14,11 +14,13 @@ the addon. Forever Social itself remains usable without the app.
 - **A compact overview.** Character, connection status and Sync now; setup opens only when needed.
 - **Optional background polling.** Check the server every 30 seconds while the app is running.
 - **One WoW addon.** Downloaded data lives inside Forever Social, without a second data addon.
-- **Private means private.** Notes, encounters and blocklists are excluded from the export.
+- **Private means private.** Notes, encounters, drafts and mute/blocklists are excluded from the export.
+- **Portable access.** Password-encrypted account backup/import and confirmed account deletion under Manage access.
+- **Precise post status.** API 1.2.0 supplies acknowledgements of exact stored post versions.
 
 Download the Windows ZIP under **Releases**, extract it and open
 **ForeverSocialCompanion.exe**. You need Windows 10/11 x64 and Forever Social
-1.3.2 or newer. Enable the connection with **/fs companion**, save with
+1.4.0 or newer. Enable the connection with **/fs companion**, save with
 **/reload**, select the game folder in the app and click **Sync now**.
 No invitation code is needed. Existing access is reused.
 
@@ -39,11 +41,13 @@ nutzen.
 - **Kompakte Übersicht:** Charakter, Status und Jetzt abgleichen; Einrichtung nur bei Bedarf.
 - **Optionale Automatik:** prüft den Server alle 30 Sekunden, solange die App läuft.
 - **Ein WoW-Addon:** Serverdaten liegen direkt im Hauptaddon.
-- **Private Daten bleiben privat:** Notizen, Begegnungen und Blocklisten werden nicht exportiert.
+- **Private Daten bleiben privat:** Notizen, Begegnungen, Entwürfe, Stumm- und Blocklisten werden nicht exportiert.
+- **Zugang mitnehmen:** passwortgeschützte Sicherung/Übernahme und bestätigtes Löschen unter Zugang verwalten.
+- **Genauer Beitragsstatus:** API 1.2.0 bestätigt den konkret gespeicherten Beitragsstand.
 
 Unter **Releases** das Windows-ZIP laden, entpacken und
 **ForeverSocialCompanion.exe** öffnen. Benötigt werden Windows 10/11 x64 und
-Forever Social ab 1.3.2. Im Spiel **/fs companion** öffnen, die Verbindung
+Forever Social ab 1.4.0. Im Spiel **/fs companion** öffnen, die Verbindung
 freigeben und mit **/reload** speichern. In der App den Spielordner auswählen
 und **Jetzt abgleichen** anklicken. Ein Einladungscode ist nicht nötig.
 Bestehende Zugänge werden übernommen.
